@@ -40,9 +40,10 @@ struct openssl_diffie_hellman_t {
  * Creates a new openssl_diffie_hellman_t object.
  *
  * @param group			Diffie Hellman group number to use
+ * @param xa			Diffie Hellman private value to use
  * @return				openssl_diffie_hellman_t object, NULL if not supported
  */
-openssl_diffie_hellman_t *openssl_diffie_hellman_create(diffie_hellman_group_t group);
+openssl_diffie_hellman_t *openssl_diffie_hellman_create(diffie_hellman_group_t group, chunk_t *xa);
 
 #endif /** OPENSSL_DIFFIE_HELLMAN_H_ @}*/
 

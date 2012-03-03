@@ -61,7 +61,7 @@ struct attribute_provider_t {
 	 * @return				enumerator (configuration_attribute_type_t, chunk_t)
 	 */
 	enumerator_t* (*create_attribute_enumerator)(attribute_provider_t *this,
-											identification_t *id, host_t *vip);
+							char * names, identification_t *id, host_t *vip);
 };
 
 #endif /** ATTRIBUTE_PROVIDER_H_ @}*/

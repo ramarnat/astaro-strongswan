@@ -77,6 +77,7 @@ noklips_raw_eroute(const ip_address *this_host UNUSED
 				   , unsigned int transport_proto UNUSED
 				   , const struct pfkey_proto_info *proto_info UNUSED
 				   , time_t use_lifetime UNUSED
+				   , int iface UNUSED
 				   , unsigned int op UNUSED
 				   , const char *text_said UNUSED)
 {

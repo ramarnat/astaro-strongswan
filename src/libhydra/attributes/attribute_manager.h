@@ -66,7 +66,7 @@ struct attribute_manager_t {
 	 * @return				enumerator (configuration_attribute_type_t, chunk_t)
 	 */
 	enumerator_t* (*create_responder_enumerator)(attribute_manager_t *this,
-											identification_t *id, host_t *vip);
+								char *name, identification_t *id, host_t *vip);
 
 	/**
 	 * Register an attribute provider to the manager.

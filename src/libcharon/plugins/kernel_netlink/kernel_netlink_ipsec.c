@@ -198,7 +198,9 @@ static kernel_algorithm_t integrity_algs[] = {
 	{AUTH_HMAC_SHA1_96,			"sha1"				},
 	{AUTH_HMAC_SHA2_256_96,		"sha256"			},
 	{AUTH_HMAC_SHA2_256_128,	"hmac(sha256)"		},
+	{AUTH_HMAC_SHA2_384_96,		"sha384"			},
 	{AUTH_HMAC_SHA2_384_192,	"hmac(sha384)"		},
+	{AUTH_HMAC_SHA2_512_96,		"sha512"			},
 	{AUTH_HMAC_SHA2_512_256,	"hmac(sha512)"		},
 /*	{AUTH_DES_MAC,				"***"				}, */
 /*	{AUTH_KPDK_MD5,				"***"				}, */
@@ -1080,12 +1082,14 @@ METHOD(kernel_ipsec_t, add_sa, status_t,
 		DBG2(DBG_KNL, "  using integrity algorithm %N with key size %d",
 			 integrity_algorithm_names, int_alg, int_key.len * 8);
 
-		if (int_alg == AUTH_HMAC_SHA2_256_128)
+		if (int_alg == AUTH_HMAC_SHA2_256_128 ||
+			int_alg == AUTH_HMAC_SHA2_384_96 ||
+			int_alg == AUTH_HMAC_SHA2_512_96)
 		{
 			struct xfrm_algo_auth* algo;
 
-			/* the kernel uses SHA256 with 96 bit truncation by default,
-			 * use specified truncation size supported by newer kernels */
+			/* the kernel uses SHA256 with 96 bit truncation by default.
+			 * specifying truncation size supported by newer kernels */
 			rthdr->rta_type = XFRMA_ALG_AUTH_TRUNC;
 			rthdr->rta_len = RTA_LENGTH(sizeof(struct xfrm_algo_auth) + int_key.len);
 
@@ -1097,7 +1101,7 @@ METHOD(kernel_ipsec_t, add_sa, status_t,
 
 			algo = (struct xfrm_algo_auth*)RTA_DATA(rthdr);
 			algo->alg_key_len = int_key.len * 8;
-			algo->alg_trunc_len = 128;
+			algo->alg_trunc_len = (int_alg == AUTH_HMAC_SHA2_256_128 ? 128 : 96);
 			strcpy(algo->alg_name, alg_name);
 			memcpy(algo->alg_key, int_key.ptr, int_key.len);
 		}

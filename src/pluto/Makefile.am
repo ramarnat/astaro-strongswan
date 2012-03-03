@@ -40,6 +40,7 @@ pkcs7.c pkcs7.h \
 pluto.c pluto.h \
 plutomain.c \
 rcv_whack.c rcv_whack.h \
+sa_sync.c sa_sync.h \
 server.c server.h \
 smartcard.c smartcard.h \
 spdb.c spdb.h \

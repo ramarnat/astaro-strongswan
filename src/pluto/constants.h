@@ -149,8 +149,7 @@ enum ipsec_authentication_algo {
 	AH_RSA          = 10,
 	AH_AES_128_GMAC = 11,
 	AH_AES_192_GMAC = 12,
-	AH_AES_256_GMAC = 13,
-	AH_SHA2_256_96  = 252
+	AH_AES_256_GMAC = 13
 };
 
 extern enum_names ah_transform_names;
@@ -259,9 +258,10 @@ enum event_type {
 	EVENT_SA_REPLACE,           /* SA replacement event */
 	EVENT_SA_REPLACE_IF_USED,   /* SA replacement event */
 	EVENT_SA_EXPIRE,            /* SA expiration event */
+	EVENT_SA_SYNC_UPDATE,       /* HA system: states update event */
 	EVENT_NAT_T_KEEPALIVE,      /* NAT Traversal Keepalive */
 	EVENT_DPD,                  /* dead peer detection */
-	EVENT_DPD_TIMEOUT,          /* dead peer detection timeout */
+	EVENT_DPD_UPDATE,           /* dead peer detection update*/
 	EVENT_LOG_DAILY             /* reset certain log events/stats */
 };
 
@@ -332,8 +332,11 @@ extern const char *const debug_bit_names[];
 #define DBG_CONTROLMORE LELEM(10)       /* more detailed debugging */
 
 #define DBG_PRIVATE     LELEM(11)       /* private information: DANGER! */
+#define DBG_RES12       LELEM(12)
+#define DBG_RES13       LELEM(13)
+#define DBG_HA          LELEM(14)
 
-#define IMPAIR0 12      /* first bit for IMPAIR_* */
+#define IMPAIR0 15      /* first bit for IMPAIR_* */
 
 #define IMPAIR_DELAY_ADNS_KEY_ANSWER    LELEM(IMPAIR0+0)        /* sleep before answering */
 #define IMPAIR_DELAY_ADNS_TXT_ANSWER    LELEM(IMPAIR0+1)        /* sleep before answering */
@@ -375,11 +378,6 @@ extern const char *const state_story[];
 
 enum state_kind {
 	STATE_UNDEFINED,    /* 0 -- most likely accident */
-
-	/*  Opportunism states: see "Opportunistic Encryption" 2.2 */
-
-	OPPO_ACQUIRE,       /* got an ACQUIRE message for this pair */
-	OPPO_GW_DISCOVERED, /* got TXT specifying gateway */
 
 	/* IKE states */
 
@@ -833,7 +831,6 @@ extern enum_names auth_alg_names, extended_auth_alg_names;
 #define AUTH_ALGORITHM_AES_192_GMAC       12
 #define AUTH_ALGORITHM_AES_256_GMAC       13
 #define AUTH_ALGORITHM_NULL              251
-#define AUTH_ALGORITHM_HMAC_SHA2_256_96  252
 
 /* Oakley Lifetime Type attribute
  * draft-ietf-ipsec-ike-01.txt appendix A

@@ -88,7 +88,8 @@ void alg_info_free(struct alg_info *alg_info)
  * Raw add routine: only checks for no duplicates
  */
 static void __alg_info_esp_add(struct alg_info_esp *alg_info, int ealg_id,
-							   unsigned ek_bits, int aalg_id, unsigned ak_bits)
+							   unsigned ek_bits, int aalg_id, unsigned ak_bits,
+							   unsigned ak_bits_trunc)
 {
 	struct esp_info *esp_info = alg_info->esp;
 	unsigned cnt = alg_info->alg_info_cnt, i;
@@ -112,6 +113,7 @@ static void __alg_info_esp_add(struct alg_info_esp *alg_info, int ealg_id,
 	esp_info[cnt].esp_ealg_keylen = ek_bits;
 	esp_info[cnt].esp_aalg_id = aalg_id;
 	esp_info[cnt].esp_aalg_keylen = ak_bits;
+	esp_info[cnt].esp_aalg_keylen_trunc = ak_bits_trunc;
 
 	/* sadb values */
 	esp_info[cnt].encryptalg = ealg_id;
@@ -149,7 +151,7 @@ static bool is_authenticated_encryption(int ealg_id)
  * Add ESP alg info _with_ logic (policy):
  */
 static void alg_info_esp_add(struct alg_info *alg_info, int ealg_id,
-							 int ek_bits, int aalg_id, int ak_bits)
+							 int ek_bits, int aalg_id, int ak_bits, int ak_bits_trunc)
 {
 	/* Policy: default to 3DES */
 	if (ealg_id == 0)
@@ -162,23 +164,23 @@ static void alg_info_esp_add(struct alg_info *alg_info, int ealg_id,
 		{
 			__alg_info_esp_add((struct alg_info_esp *)alg_info,
 								ealg_id, ek_bits,
-								AUTH_ALGORITHM_NONE, 0);
+								AUTH_ALGORITHM_NONE, 0, 0);
 		}
 		else if (aalg_id > 0)
 		{
 			__alg_info_esp_add((struct alg_info_esp *)alg_info,
 								ealg_id, ek_bits,
-								aalg_id, ak_bits);
+								aalg_id, ak_bits, ak_bits_trunc);
 		}
 		else
 		{
 			/* Policy: default to SHA-1 and MD5 */
 			__alg_info_esp_add((struct alg_info_esp *)alg_info,
 								ealg_id, ek_bits,
-								AUTH_ALGORITHM_HMAC_SHA1, ak_bits);
+								AUTH_ALGORITHM_HMAC_SHA1, ak_bits, 0);
 			__alg_info_esp_add((struct alg_info_esp *)alg_info,
 								ealg_id, ek_bits,
-								AUTH_ALGORITHM_HMAC_MD5, ak_bits);
+								AUTH_ALGORITHM_HMAC_MD5, ak_bits, 0);
 		}
 	}
 }
@@ -283,7 +285,8 @@ in_loop:
 
 static status_t alg_info_add(chunk_t alg, unsigned protoid,
 							 int *ealg, size_t *ealg_keysize,
-							 int *aalg, size_t *aalg_keysize, int *dh_group)
+							 int *aalg, size_t *aalg_keysize,
+							 size_t *aalg_keysize_trunc, int *dh_group)
 {
 	const proposal_token_t *token = proposal_get_token(alg.ptr, alg.len);
 
@@ -320,6 +323,7 @@ static status_t alg_info_add(chunk_t alg, unsigned protoid,
 				return FAILED;
 			}
 			*aalg_keysize = token->keysize;
+			*aalg_keysize_trunc = token->keysize_trunc;
 			break;
 		case DIFFIE_HELLMAN_GROUP:
 			if (protoid == PROTO_ISAKMP)
@@ -357,6 +361,7 @@ static status_t alg_info_parse_str(struct alg_info *alg_info, char *alg_str)
 		int dh_group = 0;
 		size_t ealg_keysize = 0;
 		size_t aalg_keysize = 0;
+		size_t aalg_keysize_trunc = 0;
 
 		eat_whitespace(&string);
 
@@ -369,13 +374,15 @@ static status_t alg_info_parse_str(struct alg_info *alg_info, char *alg_str)
 			{
 				status |= alg_info_add(alg, alg_info->alg_info_protoid,
 									   &ealg, &ealg_keysize,
-									   &aalg, &aalg_keysize, &dh_group);
+									   &aalg, &aalg_keysize, &aalg_keysize_trunc,
+									   &dh_group);
 			}
 			if (string.len)
 			{
 				status |= alg_info_add(string, alg_info->alg_info_protoid,
 									   &ealg, &ealg_keysize,
-									   &aalg, &aalg_keysize, &dh_group);
+									   &aalg, &aalg_keysize, &aalg_keysize_trunc,
+									   &dh_group);
 			}
 		}
 		if (status == SUCCESS)
@@ -385,7 +392,7 @@ static status_t alg_info_parse_str(struct alg_info *alg_info, char *alg_str)
 			{
 				case PROTO_IPSEC_ESP:
 					alg_info_esp_add(alg_info, ealg, ealg_keysize,
-											   aalg, aalg_keysize);
+											   aalg, aalg_keysize, aalg_keysize_trunc);
 					break;
 				case PROTO_ISAKMP:
 					alg_info_ike_add(alg_info, ealg, ealg_keysize,
@@ -547,6 +554,12 @@ alg_info_snprint(char *buf, int buflen, struct alg_info *alg_info)
 						enum_show(&auth_alg_names, esp_info->esp_aalg_id));
 				ptr += np;
 				buflen -= np;
+				if (esp_info->esp_aalg_keylen_trunc)
+				{
+					np = snprintf(ptr, buflen, "_%u", esp_info->esp_aalg_keylen_trunc);
+					ptr += np;
+					buflen -= np;
+				}
 				if (buflen < 0)
 					goto out;
 			}
@@ -635,6 +648,12 @@ int alg_info_snprint_esp(char *buf, int buflen, struct alg_info_esp *alg_info)
 						   esp_info->esp_aalg_id, aklen);
 			ptr += ret;
 			buflen -= ret;
+			if (esp_info->esp_aalg_keylen_trunc)
+			{
+				ret = snprintf(ptr, buflen, "_%03d", esp_info->esp_aalg_keylen_trunc);
+				ptr += ret;
+				buflen -= ret;
+			}
 			if (buflen < 0)
 				break;
 		}

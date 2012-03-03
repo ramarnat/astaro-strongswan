@@ -24,6 +24,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/queue.h>
+#include <sys/un.h>
 
 #include <freeswan.h>
 
@@ -43,6 +44,7 @@
 #include "demux.h"      /* needs packet.h */
 #include "ipsec_doi.h"  /* needs demux.h and state.h */
 #include "crypto.h"
+#include "sa_sync.h"
 
 /*
  * Global variables: had to go somewhere, might as well be this file.
@@ -163,15 +165,20 @@ static struct state **state_hash(const u_char *icookie, const u_char *rcookie,
 /* Get a state object.
  * Caller must schedule an event for this object so that it doesn't leak.
  * Caller must insert_state().
+ *
+ * HA System: Moved next_so to global to be able to access in insert_state()
  */
+static so_serial_t next_so = SOS_FIRST;
 struct state *new_state(void)
 {
 	static const struct state blank_state;      /* initialized all to zero & NULL */
-	static so_serial_t next_so = SOS_FIRST;
 	struct state *st;
 
 	st = clone_thing(blank_state);
 	st->st_serialno = next_so++;
+	/* HA System: Well this should not happen but just to be sure */
+	if (next_so == 0)
+		next_so = SOS_FIRST + 1;
 	passert(next_so > SOS_FIRST);       /* overflow can't happen! */
 	st->st_whack_sock = NULL_FD;
 	DBG(DBG_CONTROL, DBG_log("creating state object #%lu at %p",
@@ -231,6 +238,12 @@ void insert_state(struct state *st)
 	st->st_hashchain_next = *p;
 	*p = st;
 
+	/* HA System: Make sure serial numbers are in sync */
+	if (HA_NOT_MASTER) {
+		if (st->st_serialno >= next_so)
+			next_so = st->st_serialno + 1;
+    }
+
 	/* Ensure that somebody is in charge of killing this state:
 	 * if no event is scheduled for it, schedule one to discard the state.
 	 * If nothing goes wrong, this event will be replaced by
@@ -280,6 +293,11 @@ void delete_state(struct state *st)
 	connection_t *const c = st->st_connection;
 	struct state *old_cur_state = cur_state == st? NULL : cur_state;
 
+	/* HA System: Time to send delete notifys to our HA system */
+	if(ha_master == 1)
+		do_sync_del_state(st);
+	del_ha_state(st->st_serialno);
+
 	set_cur_state(st);
 
 	/* If DPD is enabled on this state object, clear any pending events */
@@ -294,9 +312,13 @@ void delete_state(struct state *st)
 	}
 
 	/* tell the other side of any IPSEC SAs that are going down */
-	if (IS_IPSEC_SA_ESTABLISHED(st->st_state)
-	|| IS_ISAKMP_SA_ESTABLISHED(st->st_state))
-		send_delete(st);
+	/* HA System: Dont tell if in HA slave mode */
+	if (ha_interface == NULL || ha_master == 1) {
+		if (IS_IPSEC_SA_ESTABLISHED(st->st_state)
+		|| st->st_state == STATE_QUICK_R1
+		|| IS_ISAKMP_SA_ESTABLISHED(st->st_state))
+			send_delete(st);
+	}
 
 	delete_event(st);   /* delete any pending timer event */
 
@@ -388,7 +410,7 @@ bool states_use_connection(connection_t *c)
 /**
  * Delete all states that were created for a given connection.
  * if relations == TRUE, then also delete states that share
- * the same phase 1 SA.
+ * the same phase 1 SA or host_pair and are older.
  */
 void delete_states_by_connection(connection_t *c, bool relations)
 {
@@ -398,7 +420,7 @@ void delete_states_by_connection(connection_t *c, bool relations)
 	struct spd_route *sr;
 
 	/* save this connection's isakmp SA, since it will get set to later SOS_NOBODY */
-	so_serial_t parent_sa = c->newest_isakmp_sa;
+	so_serial_t conn_isakmp_sa = c->newest_isakmp_sa;
 
 	if (ck == CK_INSTANCE)
 		c->kind = CK_GOING_AWAY;
@@ -424,11 +446,14 @@ void delete_states_by_connection(connection_t *c, bool relations)
 
 				st = st->st_hashchain_next;     /* before this is deleted */
 
-
-				if ((this->st_connection == c
-						|| (relations && parent_sa != SOS_NOBODY
-						&& this->st_clonedfrom == parent_sa))
-						&& (pass == 1 || !IS_ISAKMP_SA_ESTABLISHED(this->st_state)))
+				connection_t *d = this->st_connection;
+				if ((c == d || (relations &&
+					 (conn_isakmp_sa != SOS_NOBODY &&
+					  this->st_clonedfrom == conn_isakmp_sa ||
+					  d && c->host_pair == d->host_pair &&
+					  same_peer_ids(c, d, NULL) &&
+					  this->st_serialno < conn_isakmp_sa)))
+					&& (pass == 1 || !IS_ISAKMP_SA_ESTABLISHED(this->st_state)))
 				{
 					struct state *old_cur_state
 						= cur_state == this? NULL : cur_state;
@@ -532,6 +557,7 @@ struct state *duplicate_state(struct state *st)
 	nst->st_skeyid_a = chunk_clone(st->st_skeyid_a);
 	nst->st_skeyid_e = chunk_clone(st->st_skeyid_e);
 	nst->st_enc_key = chunk_clone(st->st_enc_key);
+	nst->st_dpd = st->st_dpd;
 
 	return nst;
 }
@@ -644,9 +670,9 @@ struct state *find_phase2_state_to_delete(const struct state *p1st,
 }
 
 /**
- * Find newest Phase 1 negotiation state object for suitable for connection c
+ * Find newest state object suitable for connection c
  */
-struct state *find_phase1_state(const connection_t *c, lset_t ok_states)
+struct state *find_state_by_phase(const connection_t *c, lset_t ok_states)
 {
 	struct state
 		*st,
@@ -734,7 +760,7 @@ void fmt_state(bool all, struct state *st, time_t n, char *state_buf,
 		, st->st_serialno
 		, c->name, inst
 		, enum_name(&state_names, st->st_state)
-		, state_story[st->st_state - STATE_MAIN_R0]
+		, state_story[st->st_state]
 		, timer_event_names, st->st_event->ev_type
 		, delta
 		, np1, np2, eo, dpd);
@@ -993,8 +1019,154 @@ startover:
 	return cpi;
 }
 
+/* --------- HA System functions -------- */
+
+void
+set_syncing_state(short status, short node_id)
+{
+	int sockfd;
+	char buffer[32];
+	struct sockaddr_un remote;
+
+	if ((sockfd = socket(PF_UNIX, SOCK_STREAM, 0)) == -1)
+		return;
+
+	remote.sun_family = AF_UNIX;
+	strcpy(remote.sun_path, "\0/com/astaro/ha_control");
+
+	if (connect(sockfd, (struct sockaddr *)&remote, sizeof(remote)) == -1)
+		goto out;
+
+	snprintf(buffer, sizeof(buffer), "sync %s %u ipsec",
+	         status ? "start" : "stop", node_id);
+
+	if (send(sockfd, buffer, strlen(buffer), 0) == -1)
+		goto out;
+
+	recv(sockfd, buffer, sizeof(buffer), 0);
+
+out:
+	close(sockfd);
+}
+
+#define start_syncing(x) set_syncing_state(1, (x));
+#define stop_syncing(x)  set_syncing_state(0, (x));
+
+/*
+ * This function walks through the state table and
+ * synchronizes every established state.
+ * Newest states come first but we need oldest first,
+ * so we start to sync from the end and go backwards.
+ */
+void
+state_sync_bulk(struct in_addr node_addr)
+{
+	int i;
+
+	DBG(DBG_HA, DBG_log("HA System: bulk sending states to node %s", inet_ntoa(node_addr)));
+
+	start_syncing(((unsigned char *) &node_addr.s_addr)[3]);
+	for (i = 0; i < STATE_TABLE_SIZE; i++) {
+		struct state *st = statetable[i];
+		if (st == NULL)
+			continue;
+
+		while (st->st_hashchain_next != NULL)
+			st = st->st_hashchain_next;
+
+		/* And now do the other way around */
+		do
+		{
+			if (IS_IPSEC_SA_ESTABLISHED(st->st_state)
+			|| IS_ISAKMP_SA_ESTABLISHED(st->st_state))
+			    do_sync_add_state(st, TRUE, node_addr);
+			/* Give slave some time to insert state. FIXME: Add buffer on slave side */
+			usleep(2000);
+			st = st->st_hashchain_prev;
+		}
+		while (st != NULL);
+	}
+	stop_syncing(((unsigned char *)&node_addr.s_addr)[3]);
+}
+
+/*
+ * This function will increase all outbound SAs with
+ * ha_seqdiff_out value. Needed for immediately re-takeover.
+ */
+void
+state_increase_oseq()
+{
+	struct state *st;
+	uint32_t seqno = 0;
+	int i;
+
+	for (i = 0; i < STATE_TABLE_SIZE; i++)
+	{
+		for (st = statetable[i]; st != NULL; st = st->st_hashchain_next)
+		{
+			if (!IS_IPSEC_SA_ESTABLISHED(st->st_state))
+				continue;
+
+			if (st->st_esp.present)
+			{
+				kernel_ops->update_seq(IPPROTO_ESP, st->st_esp.attrs.spi, st->st_connection->spd.that.host_addr.u.v4.sin_addr.s_addr, &seqno);
+				seqno += ha_seqdiff_out;
+				kernel_ops->update_seq(IPPROTO_ESP, st->st_esp.attrs.spi, st->st_connection->spd.that.host_addr.u.v4.sin_addr.s_addr, &seqno);
+			}
+
+			else if (st->st_ah.present)
+			{
+				kernel_ops->update_seq(IPPROTO_AH, st->st_ah.attrs.spi, st->st_connection->spd.that.host_addr.u.v4.sin_addr.s_addr, &seqno);
+				seqno += ha_seqdiff_out;
+				kernel_ops->update_seq(IPPROTO_AH, st->st_ah.attrs.spi, st->st_connection->spd.that.host_addr.u.v4.sin_addr.s_addr, &seqno);
+			}
+		}
+	}
+}
+
+/* This function adds DPD timers to all DPD SAs */
+void insert_dpd_events()
+{
+	int i;
+	for (i = 0; i < STATE_TABLE_SIZE; i++)
+	{
+		struct state *st;
+		for (st = statetable[i]; st != NULL; st = st->st_hashchain_next)
+		{
+			connection_t *c = st->st_connection;
+			if (st->st_dpd && c->dpd_action != DPD_ACTION_NONE)
+			{
+				if (IS_ISAKMP_SA_ESTABLISHED(st->st_state))
+				{
+					event_schedule(EVENT_DPD, c->dpd_delay, st);
+				}
+				else if (IS_IPSEC_SA_ESTABLISHED(st->st_state))
+				{
+					event_schedule(EVENT_DPD_UPDATE, c->dpd_delay, st);
+				}
+			}
+		}
+	}
+}
+
+/* All DPD timers are removed from DPD SAs */
+void remove_dpd_events()
+{
+	int i;
+	for (i = 0; i < STATE_TABLE_SIZE; i++)
+	{
+		struct state *st;
+		for (st = statetable[i]; st != NULL; st = st->st_hashchain_next)
+		{
+			delete_dpd_event(st);
+		}
+	}
+}
+
+
 /*
  * Local Variables:
  * c-basic-offset:4
  * End:
  */
+

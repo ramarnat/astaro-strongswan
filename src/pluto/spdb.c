@@ -1185,6 +1185,10 @@ notification_t parse_isakmp_sa_body(u_int32_t ipsecdoisit,
 		 */
 		if (ugh == NULL)
 		{
+			/* Assingn default key length for encryption if unset */
+			if (ta.enckeylen == 0)
+				ta.enckeylen = ta.encrypter->keydeflen;
+
 			if (!ike_alg_ok_final(ta.encrypt, ta.enckeylen, ta.hash,
 				ta.group ? ta.group->algo_id : -1, c->alg_info_ike))
 			{
@@ -2120,7 +2124,7 @@ parse_ipsec_sa_body(
 				 * (ALG_INFO_F_STRICT flag)
 				 */
 				if (!kernel_alg_esp_ok_final(esp_attrs.transid, esp_attrs.key_len
-					,esp_attrs.auth, c->alg_info_esp))
+					,esp_attrs.auth, c->alg_info_esp, &esp_attrs.auth_trunc))
 				{
 					continue;
 				}

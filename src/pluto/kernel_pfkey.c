@@ -699,6 +699,7 @@ pfkey_raw_eroute(const ip_address *this_host
 				 , unsigned int transport_proto
 				 , const struct pfkey_proto_info *proto_info UNUSED
 				 , time_t use_lifetime UNUSED
+				 , int iface UNUSED
 				 , unsigned int op
 				 , const char *text_said)
 {

@@ -124,6 +124,8 @@ struct whack_message {
 	unsigned long sa_rekey_fuzz;
 	unsigned long sa_keying_tries;
 
+	int dev;
+
 	/* For DPD 3706 - Dead Peer Detection */
 	time_t dpd_delay;
 	time_t dpd_timeout;
@@ -153,6 +155,9 @@ struct whack_message {
 	/* for WHACK_MYID: */
 	bool whack_myid;
 	char *myid; /* string 7 */
+
+	bool whack_ha_mode;
+	int ha_master;
 
 	/* for WHACK_ROUTE: */
 	bool whack_route;
@@ -216,6 +221,9 @@ struct whack_message {
 
 	/* XAUTH user identity */
 	char *xauth_identity;
+
+	/* xfrm_usersa_info.flags */
+	u_int8_t xfrm_flags;
 
 	/* space for strings (hope there is enough room):
 	 * Note that pointers don't travel on wire.

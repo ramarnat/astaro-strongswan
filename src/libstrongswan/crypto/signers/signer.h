@@ -64,8 +64,10 @@ enum integrity_algorithm_t {
 	AUTH_HMAC_SHA2_512_256 = 14,
 	/** private use */
 	AUTH_HMAC_SHA1_128 = 1025,
-	/** SHA256 96 bit truncation variant, supported by Linux kernels */
+	/** SHA2 96 bit truncation variant, supported by Linux kernels */
 	AUTH_HMAC_SHA2_256_96 = 1026,
+	AUTH_HMAC_SHA2_384_96 = 1027,
+	AUTH_HMAC_SHA2_512_96 = 1028,
 };
 
 /**

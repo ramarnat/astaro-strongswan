@@ -14,6 +14,7 @@
 
 #if defined(linux) && defined(KERNEL26_SUPPORT)
 
+#include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -39,6 +40,9 @@
 #include "log.h"
 #include "whack.h"      /* for RC_LOG_SERIOUS */
 #include "kernel_alg.h"
+#include "server.h"
+#include "state.h"
+#include "sa_sync.h"
 
 /** required for Linux 2.6.26 kernel and later */
 #ifndef XFRM_STATE_AF_UNSPEC
@@ -76,6 +80,12 @@ static sparse_names xfrm_type_names = {
 
 	NE(XFRM_MSG_POLEXPIRE),
 
+	NE(XFRM_MSG_FLUSHSA),
+	NE(XFRM_MSG_FLUSHPOLICY),
+
+	NE(XFRM_MSG_NEWAE),
+	NE(XFRM_MSG_GETAE),
+
 	NE(XFRM_MSG_MAX),
 
 	{ 0, sparse_end }
@@ -88,7 +98,6 @@ static sparse_names aalg_list = {
 	{ SADB_X_AALG_NULL,            "digest_null" },
 	{ SADB_AALG_MD5HMAC,           "md5" },
 	{ SADB_AALG_SHA1HMAC,          "sha1" },
-	{ SADB_X_AALG_SHA2_256_96HMAC, "sha256" },
 	{ SADB_X_AALG_SHA2_256HMAC,    "hmac(sha256)" },
 	{ SADB_X_AALG_SHA2_384HMAC,    "hmac(sha384)" },
 	{ SADB_X_AALG_SHA2_512HMAC,    "hmac(sha512)" },
@@ -178,6 +187,11 @@ static void init_netlink(void)
 	addr.nl_family = AF_NETLINK;
 	addr.nl_pid = getpid();
 	addr.nl_groups = XFRMGRP_ACQUIRE | XFRMGRP_EXPIRE;
+	if (ha_interface)
+	{
+		/* Subscribe to seq number updates on HA systems */
+		addr.nl_groups |= XFRMGRP_AEVENTS;
+	}
 	if (bind(netlink_bcast_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
 	{
 		exit_log_errno((e, "Failed to bind bcast socket in init_netlink()"));
@@ -201,7 +215,7 @@ static bool send_netlink_msg(struct nlmsghdr *hdr, struct nlmsghdr *rbuf,
 	struct {
 		struct nlmsghdr n;
 		struct nlmsgerr e;
-		char data[1024];
+		char data[4096];	/* Should be getpagesize(), which is maximum size of one netlink msgs. 4096 should be right in most cases. */
 	} rsp;
 
 	size_t len;
@@ -391,6 +405,7 @@ static bool netlink_policy(struct nlmsghdr *hdr, bool enoent_ok,
  * @param satype int
  * @param proto_info
  * @param lifetime (Currently unused)
+ * @param iface int
  * @param ip int
  * @return boolean True if successful
  */
@@ -403,6 +418,7 @@ static bool netlink_raw_eroute(const ip_address *this_host
 							 , unsigned int transport_proto
 							 , const struct pfkey_proto_info *proto_info
 							 , time_t use_lifetime UNUSED
+							 , int iface
 							 , unsigned int op
 							 , const char *text_said)
 {
@@ -463,11 +479,23 @@ static bool netlink_raw_eroute(const ip_address *this_host
 	req.u.p.sel.prefixlen_d = that_client->maskbits;
 	req.u.p.sel.proto = transport_proto;
 	req.u.p.sel.family = family;
+	if (policy == IPSEC_POLICY_IPSEC)
+	{
+		req.u.p.flags = XFRM_POLICY_ICMP;
+	}
 
 	dir = XFRM_POLICY_OUT;
 	if (op & (SADB_X_SAFLAGS_INFLOW << ERO_FLAG_SHIFT))
 	{
 		dir = XFRM_POLICY_IN;
+	}
+
+	if (iface)
+	{
+		if (dir == XFRM_POLICY_OUT)
+			req.u.p.sel.oif = iface;
+		else
+			req.u.p.sel.iif = iface;
 	}
 
 	if ((op & ERO_MASK) == ERO_DELETE)
@@ -613,6 +641,7 @@ static bool netlink_add_sa(const struct kernel_sa *sa, bool replace)
 	{
 		req.p.mode = XFRM_MODE_TUNNEL;
 		req.p.flags |= XFRM_STATE_AF_UNSPEC;
+		req.p.flags |= sa->xfrm_flags;
 	}
 	else
 	{
@@ -645,16 +674,12 @@ static bool netlink_add_sa(const struct kernel_sa *sa, bool replace)
 					enum_show(&auth_alg_names, sa->authalg),
 					sa->authkeylen * BITS_PER_BYTE)
 			)
-
-		if (sa->authalg == SADB_X_AALG_SHA2_256HMAC)
+		if (sa->authkeylen_trunc)
 		{
 			struct xfrm_algo_auth algo;
-
-			/* the kernel uses SHA256 with 96 bit truncation by default,
-			 * use specified truncation size supported by newer kernels */
 			strcpy(algo.alg_name, name);
 			algo.alg_key_len = sa->authkeylen * BITS_PER_BYTE;
-			algo.alg_trunc_len = 128;
+			algo.alg_trunc_len = sa->authkeylen_trunc;
 
 			attr->rta_type = XFRMA_ALG_AUTH_TRUNC;
 			attr->rta_len = RTA_LENGTH(sizeof(algo) + sa->authkeylen);
@@ -678,6 +703,15 @@ static bool netlink_add_sa(const struct kernel_sa *sa, bool replace)
 				, sa->authkeylen);
 		}
 		req.n.nlmsg_len += attr->rta_len;
+		attr = (struct rtattr *)((char *)attr + attr->rta_len);
+	}
+
+	if (sa->dev)
+	{
+		attr->rta_type = XFRMA_RECV_DEV;
+		attr->rta_len = RTA_LENGTH(sizeof(int));
+		req.n.nlmsg_len += attr->rta_len;
+		*(int *) RTA_DATA(attr) = sa->dev;
 		attr = (struct rtattr *)((char *)attr + attr->rta_len);
 	}
 
@@ -797,6 +831,92 @@ static bool netlink_add_sa(const struct kernel_sa *sa, bool replace)
 
 		req.n.nlmsg_len += attr->rta_len;
 		attr = (struct rtattr *)((char *)attr + attr->rta_len);
+	}
+
+	/* If necessary add peer's original l2tp port for
+	 * multiple l2tp connections behind the same NAT
+	 */
+	if (sa->st && sa->st->st_connection->l2tp_orig_port)
+	{
+		attr->rta_type = XFRMA_L2TP_PORT;
+		attr->rta_len = RTA_LENGTH(sizeof(u_int16_t));
+
+		memcpy(RTA_DATA(attr), &sa->st->st_connection->l2tp_orig_port
+			, sizeof(u_int16_t));
+
+		req.n.nlmsg_len += attr->rta_len;
+		attr = (struct rtattr *)((char *)attr + attr->rta_len);
+	}
+
+	/*
+	 * HA System: See if there is a initial replay struct given.
+	 *            If SA is Outbound add ha_seqdiff_out value.
+	 */
+
+	/* Add anti replay seqno threshold */
+	if (ha_interface != NULL)
+	{
+		attr->rta_type = XFRMA_REPLAY_THRESH;
+		attr->rta_len = RTA_LENGTH(sizeof(uint32_t));
+
+		/* Lets test if its a Outbound connection */
+		if (sa->st != NULL && sameaddr(sa->src, &sa->st->st_connection->spd.this.host_addr))
+			memcpy(RTA_DATA(attr), &ha_seqdiff_out, sizeof(uint32_t));
+		else
+			memcpy(RTA_DATA(attr), &ha_seqdiff_in, sizeof(uint32_t));
+
+		req.n.nlmsg_len += attr->rta_len;
+		attr = (struct rtattr *)((char *)attr + attr->rta_len);
+	}
+
+	if (HA_NOT_MASTER)
+	{
+		struct xfrm_replay_state replay;
+		memset(&replay,0,sizeof(struct xfrm_replay_state));
+
+		/* Lets test if its a Outbound connection */
+		if (sa->st != NULL && sameaddr(sa->src, &sa->st->st_connection->spd.this.host_addr))
+		{
+			/* If it is a bulk update and esp/ah SA, tpacket.len will be set to replay struct */
+			if (sa->st->st_tpacket.ptr == NULL && sa->st->st_tpacket.len != 0)
+			{
+				replay.oseq = (uint32_t) sa->st->st_tpacket.len;
+				replay.oseq += ha_seqdiff_out;
+				sa->st->st_tpacket.len = 0;
+
+				/* Overrun check */
+				if (replay.oseq < ha_seqdiff_out)
+				{
+					replay.oseq = 0;
+					replay.oseq--;
+				}
+			}
+			else
+			{
+				replay.oseq = ha_seqdiff_out;
+			}
+		}
+		/* Must be Inbound, lets see if there are seqence numbers */
+		else if (sa->st != NULL && sa->st->st_rpacket.ptr == NULL && sa->st->st_rpacket.len != 0)
+		{
+			replay.seq = (uint32_t) sa->st->st_rpacket.len;
+			sa->st->st_rpacket.len = 0;
+		}
+
+		/* Set sequence number of added SA */
+		if (replay.oseq || replay.seq)
+		{
+			DBG(DBG_HA, DBG_log("HA System: setting sequence number of added SA %s to %u",
+				sa->text_said, replay.oseq ? replay.oseq : replay.seq));
+
+			attr->rta_type = XFRMA_REPLAY_VAL;
+			attr->rta_len = RTA_LENGTH(sizeof(replay));
+
+			memcpy(RTA_DATA(attr), &replay, sizeof(replay));
+
+			req.n.nlmsg_len += attr->rta_len;
+			attr = (struct rtattr *)((char *)attr + attr->rta_len);
+		}
 	}
 
 	return send_netlink_msg(&req.n, NULL, 0, "Add SA", sa->text_said);
@@ -1064,6 +1184,12 @@ static void netlink_acquire(struct nlmsghdr *n)
 	unsigned transport_proto;
 	err_t ugh = NULL;
 
+	/* Ignore acquire messages on all but the master node */
+	if (HA_NOT_MASTER)
+	{
+		return;
+	}
+
 	if (n->nlmsg_len < NLMSG_LENGTH(sizeof(*acquire)))
 	{
 		plog("netlink_acquire got message with length %lu < %lu bytes; ignore message"
@@ -1108,6 +1234,20 @@ static void netlink_shunt_expire(struct xfrm_userpolicy_info *pol)
 
 	replace_bare_shunt(&src, &dst, BOTTOM_PRIO, SPI_PASS, FALSE, transport_proto
 		, "delete expired bare shunt");
+}
+
+static void netlink_seq_notify(struct nlmsghdr *n)
+{
+	struct xfrm_replay_state *replay;
+	struct xfrm_aevent_id *xfrm_id = (struct xfrm_aevent_id *) ((char *) n + NLMSG_LENGTH(0));
+	struct rtattr *attr = (struct rtattr *) ((char *) n + NLMSG_LENGTH(sizeof(struct xfrm_aevent_id)));
+
+	if (ha_master == 1 && attr->rta_type == XFRMA_REPLAY_VAL)
+	{
+		replay = RTA_DATA(attr);
+		do_sync_seqno(replay->oseq ? 1 : 0, xfrm_id->sa_id.proto,
+			xfrm_id->sa_id.spi, xfrm_id->sa_id.daddr.a4, replay->oseq ? replay->oseq:replay->seq);
+	}
 }
 
 static void netlink_policy_expire(struct nlmsghdr *n)
@@ -1235,6 +1375,9 @@ static bool netlink_get(void)
 	case XFRM_MSG_POLEXPIRE:
 		netlink_policy_expire(&rsp.n);
 		break;
+	case XFRM_MSG_NEWAE:
+		netlink_seq_notify(&rsp.n);
+		break;
 	default:
 		/* ignored */
 		break;
@@ -1297,6 +1440,115 @@ static ipsec_spi_t netlink_get_spi(const ip_address *src, const ip_address *dst,
 	return rsp.u.sa.id.spi;
 }
 
+/* Gets current sequence number of SA
+ * FIXME: IPv6 Support
+ *
+ * req.id.family = AF_INET6;
+ * memcpy(&req.id.daddr.a6, &st->st_connection->spd.this.host_addr.u.v6.sin6_addr.s6_addr32, sizeof(uint32_t) * 4);
+ */
+static bool
+netlink_update_seq(uint8_t proto, uint32_t spi, uint32_t dst, uint32_t *seqno)
+{
+	struct xfrm_replay_state replay;
+	struct {
+		struct nlmsghdr n;
+		struct xfrm_aevent_id id;
+		char data[1024];
+	} req;
+	struct rtattr *attr;
+
+	memset(&req, 0, sizeof(req));
+
+	req.id.sa_id.proto = proto;
+	req.id.sa_id.spi = spi;
+	req.id.sa_id.daddr.a4 = dst;
+	req.id.sa_id.family = AF_INET;
+
+	if(*seqno == 0)
+	{
+		struct {
+			struct nlmsghdr n;
+			struct xfrm_aevent_id id;
+			char data[1024];
+		} rsp;
+		memset(&rsp, 0, sizeof(rsp));
+
+		rsp.n.nlmsg_type = XFRM_MSG_NEWAE;
+
+		req.n.nlmsg_flags = NLM_F_REQUEST;
+		req.n.nlmsg_type = XFRM_MSG_GETAE;
+		req.n.nlmsg_len = NLMSG_LENGTH(sizeof(req.id));
+
+		if(send_netlink_msg(&req.n, &rsp.n, sizeof(rsp), "get sa seq number", "ha system"))
+		{
+			struct rtattr *xfrma[XFRMA_MAX];
+			int attrlen = rsp.n.nlmsg_len - NLMSG_LENGTH(sizeof(struct xfrm_aevent_id));
+			attr = (struct rtattr*)(((char*)(&rsp.id)) + NLMSG_ALIGN(sizeof(struct xfrm_aevent_id)));
+
+			memset(xfrma, 0, sizeof(xfrma));
+			while (RTA_OK(attr, attrlen))
+			{
+				unsigned short flavor = attr->rta_type;
+
+				if (flavor)
+				{
+					if (flavor < XFRMA_MAX)
+					xfrma[flavor] = attr;
+				}
+
+				attr = RTA_NEXT(attr, attrlen);
+			}
+
+			if(xfrma[XFRMA_REPLAY_VAL] != NULL)
+			{
+				memcpy(&replay, RTA_DATA(xfrma[XFRMA_REPLAY_VAL]), sizeof(replay));
+
+				if(replay.seq)
+					*seqno = replay.seq;
+				else
+					*seqno = replay.oseq;
+				return TRUE;
+			}
+			else
+				return FALSE;
+		}
+		else
+			return FALSE;
+	}
+	else
+	{
+		struct iface *i;
+		bool outbound = TRUE;
+	
+		for (i = interfaces; i != NULL; i = i->next)
+		{
+			/* FIXME Add IPv6 support && DST*/
+			if (i->change == IFN_ADD && i->addr.u.v4.sin_addr.s_addr == dst)
+				outbound = FALSE;
+		}
+
+		attr = (struct rtattr*)(((char*)(&req.id)) + NLMSG_ALIGN(sizeof(struct xfrm_aevent_id)));
+		attr->rta_type = XFRMA_REPLAY_VAL;
+		attr->rta_len = RTA_LENGTH(sizeof(struct xfrm_replay_state));
+
+		memset(&replay, 0, sizeof(replay));
+		if(outbound)
+			replay.oseq = *seqno;
+		else
+			replay.seq = *seqno;
+
+		memcpy ((char *) attr + sizeof(struct rtattr), &replay, sizeof(struct xfrm_replay_state));
+
+		req.n.nlmsg_flags = NLM_F_REPLACE | NLM_F_REQUEST | NLM_F_ACK;
+		req.n.nlmsg_type = XFRM_MSG_NEWAE;
+		req.n.nlmsg_len = NLMSG_LENGTH(sizeof(req.id) + attr->rta_len);
+
+		send_netlink_msg(&req.n, NULL, 0, "Increase seq numbers", "HA SYSTEM");
+	}
+
+	return TRUE;
+}
+
 const struct kernel_ops linux_kernel_ops = {
 		type: KERNEL_TYPE_LINUX,
 		inbound_eroute: 1,
@@ -1315,5 +1567,6 @@ const struct kernel_ops linux_kernel_ops = {
 		process_queue: NULL,
 		grp_sa: NULL,
 		get_spi: netlink_get_spi,
+		update_seq: netlink_update_seq
 };
 #endif /* linux && KLIPS */

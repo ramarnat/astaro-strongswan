@@ -20,6 +20,7 @@ struct esp_info {
 		u_int16_t auth;         /* AUTH */
 		size_t enckeylen;       /* keylength for ESP transform */
 		size_t authkeylen;      /* keylength for AUTH */
+		size_t authkeylen_trunc;/* truncated keylength for AUTH */
 		u_int8_t encryptalg;    /* normally  encryptalg=transid */
 		u_int8_t authalg;       /* normally  authalg=auth+1 */
 };
@@ -56,6 +57,7 @@ struct alg_info_ike {
 #define esp_aalg_id auth
 #define esp_ealg_keylen enckeylen       /* bits */
 #define esp_aalg_keylen authkeylen      /* bits */
+#define esp_aalg_keylen_trunc authkeylen_trunc   /* bits */
 
 /*      alg_info_flags bits */
 #define ALG_INFO_F_STRICT       0x01

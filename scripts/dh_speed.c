@@ -53,8 +53,8 @@ static void run_test(diffie_hellman_group_t group, int rounds)
 	chunk_t chunk;
 	struct timespec timing;
 	int round;
-
-	r = lib->crypto->create_dh(lib->crypto, group);
+	
+	r = lib->crypto->create_dh(lib->crypto, group, NULL);
 	if (!r)
 	{
 		printf("skipping %N, not supported\n",
@@ -68,7 +68,7 @@ static void run_test(diffie_hellman_group_t group, int rounds)
 	start_timing(&timing);
 	for (round = 0; round < rounds; round++)
 	{
-		l[round] = lib->crypto->create_dh(lib->crypto, group);
+		l[round] = lib->crypto->create_dh(lib->crypto, group, NULL);
 	}
 	printf("A = g^a/s: %8.1f", rounds / end_timing(&timing));
 

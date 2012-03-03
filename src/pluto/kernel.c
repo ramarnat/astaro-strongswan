@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <errno.h>
 #include <wait.h>
 #include <unistd.h>
@@ -60,6 +61,7 @@
 #include "nat_traversal.h"
 #include "alg_info.h"
 #include "kernel_alg.h"
+#include "sa_sync.h"
 
 
 bool can_do_IPcomp = TRUE;  /* can system actually perform IPCOMP? */
@@ -356,33 +358,6 @@ ipsec_spi_t get_my_cpi(struct spd_route *sr, bool tunnel)
 	return htonl((ipsec_spi_t)latest_cpi);
 }
 
-/* Replace the shell metacharacters ', \, ", `, and $ in a character string
- * by escape sequences consisting of their octal values
- */
-static void escape_metachar(const char *src, char *dst, size_t dstlen)
-{
-	while (*src != '\0' && dstlen > 4)
-	{
-		switch (*src)
-		{
-		case '\'':
-		case '\\':
-		case '"':
-		case '`':
-		case '$':
-			sprintf(dst,"\\%s%o", (*src < 64)?"0":"", *src);
-			dst += 4;
-			dstlen -= 4;
-			break;
-		default:
-			*dst++ = *src;
-			dstlen--;
-		}
-		src++;
-	}
-	*dst = '\0';
-}
-
 /* invoke the updown script to do the routing and firewall commands required
  *
  * The user-specified updown script is run.  Parameters are fed to it in
@@ -463,12 +438,8 @@ static bool do_command(connection_t *c, struct spd_route *sr,
 			peerclient_str[SUBNETTOT_BUF],
 			peerclientnet_str[ADDRTOT_BUF],
 			peerclientmask_str[ADDRTOT_BUF],
-			peerca_str[BUF_LEN],
-			xauth_id_str[BUF_LEN] = "",
-			secure_myid_str[BUF_LEN] = "",
-			secure_peerid_str[BUF_LEN] = "",
-			secure_peerca_str[BUF_LEN] = "",
-			secure_xauth_id_str[BUF_LEN] = "";
+			peerca_str[BUF_LEN] = "",
+			xauth_id_str[BUF_LEN] = "";
 		ip_address ta;
 		pubkey_list_t *p;
 
@@ -497,8 +468,7 @@ static bool do_command(connection_t *c, struct spd_route *sr,
 		}
 
 		addrtot(&sr->this.host_addr, 0, me_str, sizeof(me_str));
-		snprintf(myid_str, sizeof(myid_str), "%Y", sr->this.id);
-		escape_metachar(myid_str, secure_myid_str, sizeof(secure_myid_str));
+		snprintf(myid_str, sizeof(myid_str), "%#Y", sr->this.id);
 		subnettot(&sr->this.client, 0, myclient_str, sizeof(myclientnet_str));
 		networkof(&sr->this.client, &ta);
 		addrtot(&ta, 0, myclientnet_str, sizeof(myclientnet_str));
@@ -508,16 +478,12 @@ static bool do_command(connection_t *c, struct spd_route *sr,
 		if (c->xauth_identity &&
 			c->xauth_identity->get_type(c->xauth_identity) != ID_ANY)
 		{
-			snprintf(xauth_id_str, sizeof(xauth_id_str), "%Y", c->xauth_identity);
-			escape_metachar(xauth_id_str, secure_xauth_id_str,
-					 sizeof(secure_xauth_id_str));
-			snprintf(xauth_id_str, sizeof(xauth_id_str), "PLUTO_XAUTH_ID='%s' ",
-					 secure_xauth_id_str);
+			snprintf(xauth_id_str, sizeof(xauth_id_str), "PLUTO_XAUTH_ID='%#Y' ",
+					 c->xauth_identity);
 		}
 
 		addrtot(&sr->that.host_addr, 0, peer_str, sizeof(peer_str));
-		snprintf(peerid_str, sizeof(peerid_str), "%Y", sr->that.id);
-		escape_metachar(peerid_str, secure_peerid_str, sizeof(secure_peerid_str));
+		snprintf(peerid_str, sizeof(peerid_str), "%#Y", sr->that.id);
 		subnettot(&sr->that.client, 0, peerclient_str, sizeof(peerclientnet_str));
 		networkof(&sr->that.client, &ta);
 		addrtot(&ta, 0, peerclientnet_str, sizeof(peerclientnet_str));
@@ -536,12 +502,11 @@ static bool do_command(connection_t *c, struct spd_route *sr,
 			{
 				if (key->issuer)
 				{
-					snprintf(peerca_str, BUF_LEN, "%Y", key->issuer);	
-					escape_metachar(peerca_str, secure_peerca_str, BUF_LEN);
+					snprintf(peerca_str, BUF_LEN, "%#Y", key->issuer);
 				}
 				else
 				{
-					secure_peerca_str[0] = '\0';
+					peerca_str[0] = '\0';
 				}
 				break;
 			}
@@ -581,20 +546,20 @@ static bool do_command(connection_t *c, struct spd_route *sr,
 			, sr->this.hostaccess? "PLUTO_HOST_ACCESS='1' " : ""
 			, sr->reqid + 1     /* ESP requid */
 			, me_str
-			, secure_myid_str
+			, myid_str
 			, myclient_str
 			, myclientnet_str
 			, myclientmask_str
 			, sr->this.port
 			, sr->this.protocol
 			, peer_str
-			, secure_peerid_str
+			, peerid_str
 			, peerclient_str
 			, peerclientnet_str
 			, peerclientmask_str
 			, sr->that.port
 			, sr->that.protocol
-			, secure_peerca_str
+			, peerca_str
 			, srcip_str
 			, xauth_id_str
 			, sr->this.updown == NULL? DEFAULT_UPDOWN : sr->this.updown))
@@ -896,7 +861,10 @@ void unroute_connection(connection_t *c)
 		/* only unroute if no other connection shares it */
 		if (routed(cr) && route_owner(c, NULL, NULL, NULL) == NULL)
 		{
-			(void) do_command(c, sr, "unroute");
+			/* To be sure, we do this check only for l2tp Road Warrior */
+			if (c->kind != CK_INSTANCE || c->spd.this.port != 1701
+			|| number_of_connections(&c->spd) == 1)
+				(void) do_command(c, sr, "unroute");
 		}
 	}
 }
@@ -998,6 +966,7 @@ static bool raw_eroute(const ip_address *this_host,
 					   unsigned int transport_proto,
 					   const struct pfkey_proto_info *proto_info,
 					   time_t use_lifetime,
+					   int iface,
 					   unsigned int op,
 					   const char *opname USED_BY_DEBUG)
 {
@@ -1021,7 +990,7 @@ static bool raw_eroute(const ip_address *this_host,
 
 	return kernel_ops->raw_eroute(this_host, this_client
 		, that_host, that_client, spi, satype, transport_proto, proto_info
-		, use_lifetime, op, text_said);
+		, use_lifetime, iface, op, text_said);
 }
 
 /* test to see if %hold remains */
@@ -1070,7 +1039,7 @@ bool replace_bare_shunt(const ip_address *src, const ip_address *dst,
 			if (raw_eroute(null_host, &this_broad_client, null_host, &that_broad_client
 						   , htonl(shunt_spi), SA_INT, SADB_X_SATYPE_INT
 						   , 0, null_proto_info
-						   , SHUNT_PATIENCE, ERO_ADD, why))
+						   , SHUNT_PATIENCE, 0, ERO_ADD, why))
 			{
 				struct bare_shunt *bs = malloc_thing(struct bare_shunt);
 
@@ -1095,7 +1064,7 @@ bool replace_bare_shunt(const ip_address *src, const ip_address *dst,
 	if (raw_eroute(null_host, &this_client, null_host, &that_client
 				   , htonl(shunt_spi), SA_INT, SADB_X_SATYPE_INT
 				   , transport_proto, null_proto_info
-				   , SHUNT_PATIENCE, ERO_DELETE, why))
+				   , SHUNT_PATIENCE, 0, ERO_DELETE, why))
 	{
 		struct bare_shunt **bs_pp = bare_shunt_ptr(&this_client, &that_client
 										, transport_proto);
@@ -1129,7 +1098,7 @@ static bool eroute_connection(struct spd_route *sr, ipsec_spi_t spi,
 					  , peer
 					  , &sr->that.client
 					  , spi, proto, satype
-					  , sr->this.protocol, proto_info, 0, op, buf2);
+					  , sr->this.protocol, proto_info, 0, sr->dev, op, buf2);
 }
 
 /* assign a bare hold to a connection */
@@ -1383,7 +1352,7 @@ static bool shunt_eroute(connection_t *c, struct spd_route *sr,
 		ok = raw_eroute(&c->spd.that.host_addr, &c->spd.that.client
 			, &c->spd.this.host_addr, &c->spd.this.client
 			, htonl(spi), SA_INT, SADB_X_SATYPE_INT
-			, 0, null_proto_info, 0
+			, 0, null_proto_info, 0, sr->dev
 			, op | (SADB_X_SAFLAGS_INFLOW << ERO_FLAG_SHIFT), opname);
 	}
 	return eroute_connection(sr, htonl(spi), SA_INT, SADB_X_SATYPE_INT
@@ -1758,6 +1727,10 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 
 	replace = inbound && (kernel_ops->get_spi != NULL);
 
+	/* HA System: In slave mode there will be no larval SAs which could be replaced */
+	if (HA_NOT_MASTER)
+		replace = FALSE;
+
 	src.maskbits = 0;
 	dst.maskbits = 0;
 
@@ -1831,6 +1804,8 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 		said_next->spi = ipip_spi;
 		said_next->satype = SADB_X_SATYPE_IPIP;
 		said_next->text_said = text_said;
+		said_next->xfrm_flags = c->xfrm_flags;
+		said_next->dev = c->dev;
 
 		if (!kernel_ops->add_sa(said_next, replace))
 			goto fail;
@@ -1873,6 +1848,8 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 		said_next->encapsulation = encapsulation;
 		said_next->reqid = c->spd.reqid + 2;
 		said_next->text_said = text_said;
+		said_next->xfrm_flags = c->xfrm_flags;
+		said_next->dev = c->dev;
 
 		if (!kernel_ops->add_sa(said_next, replace))
 		{
@@ -1893,30 +1870,30 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 
 		static const struct esp_info esp_info[] = {
 			{ ESP_NULL, AUTH_ALGORITHM_HMAC_MD5,
-				0, HMAC_MD5_KEY_LEN,
+				0, HMAC_MD5_KEY_LEN, 0,
 				SADB_EALG_NULL, SADB_AALG_MD5HMAC },
 			{ ESP_NULL, AUTH_ALGORITHM_HMAC_SHA1,
-				0, HMAC_SHA1_KEY_LEN,
+				0, HMAC_SHA1_KEY_LEN, 0,
 				SADB_EALG_NULL, SADB_AALG_SHA1HMAC },
 
 			{ ESP_DES, AUTH_ALGORITHM_NONE,
-				DES_CBC_BLOCK_SIZE, 0,
+				DES_CBC_BLOCK_SIZE, 0, 0,
 				SADB_EALG_DESCBC, SADB_AALG_NONE },
 			{ ESP_DES, AUTH_ALGORITHM_HMAC_MD5,
-				DES_CBC_BLOCK_SIZE, HMAC_MD5_KEY_LEN,
+				DES_CBC_BLOCK_SIZE, HMAC_MD5_KEY_LEN, 0,
 				SADB_EALG_DESCBC, SADB_AALG_MD5HMAC },
 			{ ESP_DES, AUTH_ALGORITHM_HMAC_SHA1,
 				DES_CBC_BLOCK_SIZE,
-				HMAC_SHA1_KEY_LEN, SADB_EALG_DESCBC, SADB_AALG_SHA1HMAC },
+				HMAC_SHA1_KEY_LEN, 0, SADB_EALG_DESCBC, SADB_AALG_SHA1HMAC },
 
 			{ ESP_3DES, AUTH_ALGORITHM_NONE,
-				DES_CBC_BLOCK_SIZE * 3, 0,
+				DES_CBC_BLOCK_SIZE * 3, 0, 0,
 				SADB_EALG_3DESCBC, SADB_AALG_NONE },
 			{ ESP_3DES, AUTH_ALGORITHM_HMAC_MD5,
-				DES_CBC_BLOCK_SIZE * 3, HMAC_MD5_KEY_LEN,
+				DES_CBC_BLOCK_SIZE * 3, HMAC_MD5_KEY_LEN, 0,
 				SADB_EALG_3DESCBC, SADB_AALG_MD5HMAC },
 			{ ESP_3DES, AUTH_ALGORITHM_HMAC_SHA1,
-				DES_CBC_BLOCK_SIZE * 3, HMAC_SHA1_KEY_LEN,
+				DES_CBC_BLOCK_SIZE * 3, HMAC_SHA1_KEY_LEN, 0,
 				SADB_EALG_3DESCBC, SADB_AALG_SHA1HMAC },
 		};
 
@@ -2024,6 +2001,7 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 									REPLAY_WINDOW : REPLAY_WINDOW_XFRM;
 		said_next->authalg = ei->authalg;
 		said_next->authkeylen = ei->authkeylen;
+		said_next->authkeylen_trunc = st->st_esp.attrs.auth_trunc;
 		said_next->authkey = esp_dst_keymat + key_len;
 		said_next->encalg = ei->encryptalg;
 		said_next->enckeylen = key_len;
@@ -2036,6 +2014,9 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 		said_next->natt_type = natt_type;
 		said_next->natt_oa = &natt_oa;
 		said_next->text_said = text_said;
+		said_next->xfrm_flags = c->xfrm_flags;
+		said_next->dev = c->dev;
+		said_next->st = st;
 
 		if (!kernel_ops->add_sa(said_next, replace))
 		{
@@ -2083,6 +2064,9 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 		said_next->encapsulation = encapsulation;
 		said_next->reqid = c->spd.reqid;
 		said_next->text_said = text_said;
+		said_next->xfrm_flags = c->xfrm_flags;
+		said_next->dev = c->dev;
+		said_next->st = st;
 
 		if (!kernel_ops->add_sa(said_next, replace))
 		{
@@ -2152,7 +2136,7 @@ static bool setup_half_ipsec_sa(struct state *st, bool inbound)
 			(void) raw_eroute(&c->spd.that.host_addr, &c->spd.that.client
 							  , &c->spd.this.host_addr, &c->spd.this.client
 							  , inner_spi, proto, satype, c->spd.this.protocol
-							  , proto_info, 0
+							  , proto_info, 0, c->spd.dev
 							  , ERO_ADD_INBOUND, "add inbound");
 		}
 	}
@@ -2226,11 +2210,17 @@ static bool teardown_half_ipsec_sa(struct state *st, bool inbound)
 	if (kernel_ops->inbound_eroute && inbound
 		&& c->spd.eroute_owner == SOS_NOBODY)
 	{
-		(void) raw_eroute(&c->spd.that.host_addr, &c->spd.that.client
-			, &c->spd.this.host_addr, &c->spd.this.client
-			, 256, IPSEC_PROTO_ANY, SADB_SATYPE_UNSPEC, c->spd.this.protocol
-			, null_proto_info, 0
-			, ERO_DEL_INBOUND, "delete inbound");
+		/* check if any other connection owns the policies */
+		connection_t *eroute_owner = NULL;
+		route_owner(c, NULL, &eroute_owner, NULL);
+		if (eroute_owner == NULL)
+		{
+			(void) raw_eroute(&c->spd.that.host_addr, &c->spd.that.client
+				, &c->spd.this.host_addr, &c->spd.this.client
+				, 256, IPSEC_PROTO_ANY, SADB_SATYPE_UNSPEC, c->spd.this.protocol
+				, null_proto_info, 0, c->spd.dev
+				, ERO_DEL_INBOUND, "delete inbound");
+		}
 	}
 
 	if (!kernel_ops->grp_sa)
@@ -2424,71 +2414,6 @@ void init_kernel(void)
 		event_schedule(EVENT_SHUNT_SCAN, SHUNT_SCAN_INTERVAL, NULL);
 	}
 #endif
-}
-
-/* Note: install_inbound_ipsec_sa is only used by the Responder.
- * The Responder will subsequently use install_ipsec_sa for the outbound.
- * The Initiator uses install_ipsec_sa to install both at once.
- */
-bool install_inbound_ipsec_sa(struct state *st)
-{
-	connection_t *const c = st->st_connection;
-
-	/* If our peer has a fixed-address client, check if we already
-	 * have a route for that client that conflicts.  We will take this
-	 * as proof that that route and the connections using it are
-	 * obsolete and should be eliminated.  Interestingly, this is
-	 * the only case in which we can tell that a connection is obsolete.
-	 */
-	passert(c->kind == CK_PERMANENT || c->kind == CK_INSTANCE);
-	if (c->spd.that.has_client)
-	{
-		for (;;)
-		{
-			struct spd_route *esr;
-			connection_t *o = route_owner(c, &esr, NULL, NULL);
-
-			if (o == NULL)
-			{
-				break;  /* nobody has a route */
-			}
-
-			/* note: we ignore the client addresses at this end */
-			if (sameaddr(&o->spd.that.host_addr, &c->spd.that.host_addr) &&
-				o->interface == c->interface)
-			{
-				break;  /* existing route is compatible */
-			}
-
-			if (o->kind == CK_TEMPLATE && streq(o->name, c->name))
-			{
-				break;  /* ??? is this good enough?? */
-			}
-
-			loglog(RC_LOG_SERIOUS, "route to peer's client conflicts with \"%s\" %s; releasing old connection to free the route"
-				, o->name, ip_str(&o->spd.that.host_addr));
-			release_connection(o, FALSE);
-		}
-	}
-
-	DBG(DBG_CONTROL, DBG_log("install_inbound_ipsec_sa() checking if we can route"));
-	/* check that we will be able to route and eroute */
-	switch (could_route(c))
-	{
-		case route_easy:
-		case route_nearconflict:
-			break;
-		default:
-			return FALSE;
-	}
-
-#ifdef KLIPS
-	/* (attempt to) actually set up the SAs */
-	return setup_half_ipsec_sa(st, TRUE);
-#else /* !KLIPS */
-	DBG(DBG_CONTROL, DBG_log("install_inbound_ipsec_sa()"));
-	return TRUE;
-#endif /* !KLIPS */
 }
 
 /* Install a route and then a prospective shunt eroute or an SA group eroute.
@@ -2740,6 +2665,7 @@ bool route_and_eroute(connection_t *c USED_BY_KLIPS,
 					, 0
 					, null_proto_info
 					, SHUNT_PATIENCE
+					, 0
 					, ERO_REPLACE, "restore");
 			}
 			else if (ero != NULL)
@@ -2786,15 +2712,14 @@ bool route_and_eroute(connection_t *c USED_BY_KLIPS,
 #endif /* !KLIPS */
 }
 
-bool install_ipsec_sa(struct state *st, bool inbound_also USED_BY_KLIPS)
+bool install_ipsec_sas(struct state *st)
 {
 #ifdef KLIPS
 	struct spd_route *sr;
 
-	DBG(DBG_CONTROL, DBG_log("install_ipsec_sa() for #%ld: %s"
-							 , st->st_serialno
-							 , inbound_also?
-							 "inbound and outbound" : "outbound only"));
+	DBG(DBG_CONTROL,
+		DBG_log("install_ipsec_sas() for #%ld: inbound and outbound"
+				, st->st_serialno));
 
 	switch (could_route(st->st_connection))
 	{
@@ -2806,8 +2731,7 @@ bool install_ipsec_sa(struct state *st, bool inbound_also USED_BY_KLIPS)
 	}
 
 	/* (attempt to) actually set up the SA group */
-	if ((inbound_also && !setup_half_ipsec_sa(st, TRUE)) ||
-		!setup_half_ipsec_sa(st, FALSE))
+	if (!setup_half_ipsec_sa(st, FALSE) || !setup_half_ipsec_sa(st, TRUE))
 	{
 		return FALSE;
 	}
@@ -2839,8 +2763,7 @@ bool install_ipsec_sa(struct state *st, bool inbound_also USED_BY_KLIPS)
 		}
 	}
 #else /* !KLIPS */
-	DBG(DBG_CONTROL, DBG_log("install_ipsec_sa() %s"
-		, inbound_also? "inbound and oubound" : "outbound only"));
+	DBG(DBG_CONTROL, DBG_log("install_ipsec_sas() inbound and oubound"));
 
 	switch (could_route(st->st_connection))
 	{
@@ -2943,6 +2866,8 @@ static bool update_nat_t_ipsec_esp_sa (struct state *st, bool inbound)
 	sa.natt_sport = natt_sport;
 	sa.natt_dport = natt_dport;
 	sa.transid = st->st_esp.attrs.transid;
+	sa.xfrm_flags = c->xfrm_flags;
+	sa.dev = c->dev;
 
 	return kernel_ops->add_sa(&sa, TRUE);
 }

@@ -10,6 +10,7 @@ plugin_LTLIBRARIES = libstrongswan-xauth.la
 libstrongswan_xauth_la_SOURCES = \
 	xauth_plugin.h xauth_plugin.c \
 	xauth_default_provider.c xauth_default_provider.h \
+	xauth_aua_verifier.c xauth_aua_verifier.h \
 	xauth_default_verifier.c xauth_default_verifier.h
 
 libstrongswan_xauth_la_LDFLAGS = -module -avoid-version

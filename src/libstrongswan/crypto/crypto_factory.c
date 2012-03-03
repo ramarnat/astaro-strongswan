@@ -276,7 +276,8 @@ static rng_t* create_rng(private_crypto_factory_t *this, rng_quality_t quality)
  * Implementation of crypto_factory_t.create_dh.
  */
 static diffie_hellman_t* create_dh(private_crypto_factory_t *this,
-								   diffie_hellman_group_t group)
+								   diffie_hellman_group_t group,
+								   chunk_t *xa)
 {
 	enumerator_t *enumerator;
 	entry_t *entry;
@@ -288,7 +289,7 @@ static diffie_hellman_t* create_dh(private_crypto_factory_t *this,
 	{
 		if (entry->algo == group)
 		{
-			diffie_hellman = entry->create_dh(group);
+			diffie_hellman = entry->create_dh(group, xa);
 			if (diffie_hellman)
 			{
 				break;

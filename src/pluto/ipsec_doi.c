@@ -70,6 +70,7 @@
 #include "kernel_alg.h"
 #include "nat_traversal.h"
 #include "virtual.h"
+#include "sa_sync.h"
 
 /*
  * are we sending Pluto's Vendor ID?
@@ -143,7 +144,7 @@ static bool build_and_ship_KE(struct state *st, chunk_t *g,
 {
 	if (st->st_dh == NULL)
 	{
-		st->st_dh = lib->crypto->create_dh(lib->crypto, group->algo_id);
+		st->st_dh = lib->crypto->create_dh(lib->crypto, group->algo_id, NULL);
 		if (st->st_dh == NULL)
 		{
 			plog("Diffie Hellman group %N is not available",
@@ -462,7 +463,7 @@ void send_notification_from_state(struct state *st, enum state_kind state,
 
 	if (IS_QUICK(state))
 	{
-		p1st = find_phase1_state(st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
+		p1st = find_state_by_phase(st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
 		if ((p1st == NULL) || (!IS_ISAKMP_SA_ESTABLISHED(p1st->st_state)))
 		{
 			loglog(RC_LOG_SERIOUS,
@@ -530,9 +531,10 @@ void send_delete(struct state *st)
 		*r_hash_start;  /* start of what is to be hashed */
 	bool isakmp_sa = FALSE;
 
-	if (IS_IPSEC_SA_ESTABLISHED(st->st_state))
+	if (IS_IPSEC_SA_ESTABLISHED(st->st_state)
+	|| st->st_state == STATE_QUICK_R1)
 	{
-		p1st = find_phase1_state(st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
+		p1st = find_state_by_phase(st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
 		if (p1st == NULL)
 		{
 			DBG(DBG_CONTROL, DBG_log("no Phase 1 state for Delete"));
@@ -1123,7 +1125,7 @@ void ipsecdoi_initiate(int whack_sock, connection_t *c, lset_t policy,
 	 * other issues around intent might matter).
 	 * Note: there is no way to initiate with a Road Warrior.
 	 */
-	struct state *st = find_phase1_state(c
+	struct state *st = find_state_by_phase(c
 		, ISAKMP_SA_ESTABLISHED_STATES | PHASE1_INITIATOR_STATES);
 
 	if (st == NULL)
@@ -1166,7 +1168,10 @@ void ipsecdoi_replace(struct state *st, unsigned long try)
 	int whack_sock = dup_any(st->st_whack_sock);
 	lset_t policy = st->st_policy;
 
-	if (IS_PHASE1(st->st_state))
+	if (HA_NOT_MASTER) {
+		/* HA System: Everything is just fine, let someone else do the work */
+	}
+	else if (IS_PHASE1(st->st_state))
 	{
 		passert(!HAS_IPSEC_POLICY(policy));
 		(void) main_outI1(whack_sock, st->st_connection, st, policy, try);
@@ -1206,6 +1211,27 @@ void ipsecdoi_replace(struct state *st, unsigned long try)
 /* SKEYID for preshared keys.
  * See draft-ietf-ipsec-ike-01.txt 4.1
  */
+bool generate_skeyid_preshared(struct state *st, const chunk_t *pss)
+{
+	pseudo_random_function_t prf_alg;
+	prf_t *prf;
+
+	prf_alg = oakley_to_prf(st->st_oakley.hash);
+	prf = lib->crypto->create_prf(lib->crypto, prf_alg);
+	if (prf == NULL)
+	{
+		loglog(RC_LOG_SERIOUS, "%N not available to compute skeyid",
+								pseudo_random_function_names, prf_alg);
+		return FALSE;
+	}
+	free(st->st_skeyid.ptr);
+	prf->set_key(prf, *pss);
+	prf->allocate_bytes(prf, st->st_ni, NULL);
+	prf->allocate_bytes(prf, st->st_nr, &st->st_skeyid);
+	prf->destroy(prf);
+	return TRUE;
+}
+
 static bool skeyid_preshared(struct state *st)
 {
 	const chunk_t *pss = get_preshared_secret(st->st_connection);
@@ -1215,26 +1241,8 @@ static bool skeyid_preshared(struct state *st)
 		loglog(RC_LOG_SERIOUS, "preshared secret disappeared!");
 		return FALSE;
 	}
-	else
-	{
-		pseudo_random_function_t prf_alg;
-		prf_t *prf;
 
-		prf_alg = oakley_to_prf(st->st_oakley.hash);
-		prf = lib->crypto->create_prf(lib->crypto, prf_alg);
-		if (prf == NULL)
-		{
-			loglog(RC_LOG_SERIOUS, "%N not available to compute skeyid",
-									pseudo_random_function_names, prf_alg);
-			return FALSE;
-		}
-		free(st->st_skeyid.ptr);
-		prf->set_key(prf, *pss);
-		prf->allocate_bytes(prf, st->st_ni, NULL);
-		prf->allocate_bytes(prf, st->st_nr, &st->st_skeyid);
-		prf->destroy(prf);
-		return TRUE;
-	}
+	return generate_skeyid_preshared(st, pss);
 }
 
 static bool skeyid_digisig(struct state *st)
@@ -1258,6 +1266,85 @@ static bool skeyid_digisig(struct state *st)
 	prf->destroy(prf);
 	free(nir.ptr);
 	return TRUE;
+}
+
+/* generate SKEYID_* and encryption key from SKEYID */
+void generate_keys(struct state *st)
+{
+	chunk_t seed_skeyid_d = chunk_from_chars(0x00);
+	chunk_t seed_skeyid_a = chunk_from_chars(0x01);
+	chunk_t seed_skeyid_e = chunk_from_chars(0x02);
+	chunk_t icookie = { st->st_icookie, COOKIE_SIZE };
+	chunk_t rcookie = { st->st_rcookie, COOKIE_SIZE };
+	size_t oakley_keysize = st->st_oakley.enckeylen/BITS_PER_BYTE;
+	pseudo_random_function_t prf_alg;
+	prf_t *prf;
+
+	prf_alg = oakley_to_prf(st->st_oakley.hash);
+	prf = lib->crypto->create_prf(lib->crypto, prf_alg);
+	prf->set_key(prf, st->st_skeyid);
+
+	/* SKEYID_D */
+	free(st->st_skeyid_d.ptr);
+	prf->allocate_bytes(prf, st->st_shared, NULL);
+	prf->allocate_bytes(prf, icookie, NULL);
+	prf->allocate_bytes(prf, rcookie, NULL);
+	prf->allocate_bytes(prf, seed_skeyid_d, &st->st_skeyid_d);
+
+	/* SKEYID_A */
+	free(st->st_skeyid_a.ptr);
+	prf->allocate_bytes(prf, st->st_skeyid_d, NULL);
+	prf->allocate_bytes(prf, st->st_shared, NULL);
+	prf->allocate_bytes(prf, icookie, NULL);
+	prf->allocate_bytes(prf, rcookie, NULL);
+	prf->allocate_bytes(prf, seed_skeyid_a, &st->st_skeyid_a);
+
+	/* SKEYID_E */
+	free(st->st_skeyid_e.ptr);
+	prf->allocate_bytes(prf, st->st_skeyid_a, NULL);
+	prf->allocate_bytes(prf, st->st_shared, NULL);
+	prf->allocate_bytes(prf, icookie, NULL);
+	prf->allocate_bytes(prf, rcookie, NULL);
+	prf->allocate_bytes(prf, seed_skeyid_e, &st->st_skeyid_e);
+
+	prf->destroy(prf);
+
+	/* Oakley Keying Material
+	 * Derived from Skeyid_e: if it is not big enough, generate more
+	 * using the PRF.
+	 * See RFC 2409 "IKE" Appendix B
+	 */
+	free(st->st_enc_key.ptr);
+
+	if (oakley_keysize > st->st_skeyid_e.len)
+	{
+		u_char keytemp[MAX_OAKLEY_KEY_LEN + MAX_DIGEST_LEN];
+		chunk_t seed = chunk_from_chars(0x00);
+		size_t prf_block_size, i = 0;
+
+		prf_alg = oakley_to_prf(st->st_oakley.hash);
+		prf = lib->crypto->create_prf(lib->crypto, prf_alg);
+		prf->set_key(prf, st->st_skeyid_e);
+		prf_block_size = prf->get_block_size(prf);
+
+		while (TRUE)
+		{
+			prf->get_bytes(prf, seed, &keytemp[i]);
+			i += prf_block_size;
+			if (i >= oakley_keysize)
+			{
+				break;
+			}
+			seed = chunk_create(&keytemp[i-prf_block_size], prf_block_size);
+		}
+		prf->destroy(prf);
+		st->st_enc_key = chunk_create(keytemp, oakley_keysize);
+	}
+	else
+	{
+		st->st_enc_key = chunk_create(st->st_skeyid_e.ptr, oakley_keysize);
+	}
+	st->st_enc_key = chunk_clone(st->st_enc_key);
 }
 
 /* Generate the SKEYID_* and new IV
@@ -1302,45 +1389,8 @@ static bool generate_skeyids_iv(struct state *st)
 			bad_case(st->st_oakley.auth);
 	}
 
-	/* generate SKEYID_* from SKEYID */
-	{
-		chunk_t seed_skeyid_d = chunk_from_chars(0x00);
-		chunk_t seed_skeyid_a = chunk_from_chars(0x01);
-		chunk_t seed_skeyid_e = chunk_from_chars(0x02);
-		chunk_t icookie = { st->st_icookie, COOKIE_SIZE };
-		chunk_t rcookie = { st->st_rcookie, COOKIE_SIZE };
-		pseudo_random_function_t prf_alg;
-		prf_t *prf;
-
-		prf_alg = oakley_to_prf(st->st_oakley.hash);
-		prf = lib->crypto->create_prf(lib->crypto, prf_alg);
-		prf->set_key(prf, st->st_skeyid);
-
-		/* SKEYID_D */
-		free(st->st_skeyid_d.ptr);
-		prf->allocate_bytes(prf, st->st_shared, NULL);
-		prf->allocate_bytes(prf, icookie, NULL);
-		prf->allocate_bytes(prf, rcookie, NULL);
-		prf->allocate_bytes(prf, seed_skeyid_d, &st->st_skeyid_d);
-
-		/* SKEYID_A */
-		free(st->st_skeyid_a.ptr);
-		prf->allocate_bytes(prf, st->st_skeyid_d, NULL);
-		prf->allocate_bytes(prf, st->st_shared, NULL);
-		prf->allocate_bytes(prf, icookie, NULL);
-		prf->allocate_bytes(prf, rcookie, NULL);
-		prf->allocate_bytes(prf, seed_skeyid_a, &st->st_skeyid_a);
-
-		/* SKEYID_E */
-		free(st->st_skeyid_e.ptr);
-		prf->allocate_bytes(prf, st->st_skeyid_a, NULL);
-		prf->allocate_bytes(prf, st->st_shared, NULL);
-		prf->allocate_bytes(prf, icookie, NULL);
-		prf->allocate_bytes(prf, rcookie, NULL);
-		prf->allocate_bytes(prf, seed_skeyid_e, &st->st_skeyid_e);
-
-		prf->destroy(prf);
-	}
+	/* Generate SKEYID_* and encryption key from SKEYID */
+	generate_keys(st);
 
 	/* generate IV */
 	{
@@ -1360,50 +1410,6 @@ static bool generate_skeyids_iv(struct state *st)
 		hasher->get_hash(hasher, st->st_gi, NULL);
 		hasher->get_hash(hasher, st->st_gr, st->st_new_iv);
 		hasher->destroy(hasher);
-	}
-
-	/* Oakley Keying Material
-	 * Derived from Skeyid_e: if it is not big enough, generate more
-	 * using the PRF.
-	 * See RFC 2409 "IKE" Appendix B
-	 */
-	{
-		size_t keysize = st->st_oakley.enckeylen/BITS_PER_BYTE;
-
-		/* free any existing key */
-		free(st->st_enc_key.ptr);
-
-		if (keysize > st->st_skeyid_e.len)
-		{
-			u_char keytemp[MAX_OAKLEY_KEY_LEN + MAX_DIGEST_LEN];
-			chunk_t seed = chunk_from_chars(0x00);
-			size_t prf_block_size, i;
-			pseudo_random_function_t prf_alg;
-			prf_t *prf;
-
-			prf_alg = oakley_to_prf(st->st_oakley.hash);
-			prf = lib->crypto->create_prf(lib->crypto, prf_alg);
-			prf->set_key(prf, st->st_skeyid_e);
-			prf_block_size = prf->get_block_size(prf);
-
-			for (i = 0;;)
-			{
-				prf->get_bytes(prf, seed, &keytemp[i]);
-				i += prf_block_size;
-				if (i >= keysize)
-				{
-					break;
-				}
-				seed = chunk_create(&keytemp[i-prf_block_size], prf_block_size);
-			}
-			prf->destroy(prf);
-			st->st_enc_key = chunk_create(keytemp, keysize);
-		}
-		else
-		{
-			st->st_enc_key = chunk_create(st->st_skeyid_e.ptr, keysize);
-		}
-		st->st_enc_key = chunk_clone(st->st_enc_key);
 	}
 
 	DBG(DBG_CRYPT,
@@ -3017,6 +3023,15 @@ stf_status main_inI1_outR1(struct msg_digest *md)
 				, &md->sender, md->sender_port, policy);
 	}
 
+	/* Try to find a connection to the peer with ports floated. Useful
+	 * to find a connection for peers that initiate again after a reboot.
+	 */
+	if (c == NULL)
+	{
+		c = find_host_connection(&md->iface->addr, NAT_T_IKE_FLOAT_PORT
+				, &md->sender, NAT_T_IKE_FLOAT_PORT, policy);
+	}
+
 	if (c == NULL)
 	{
 		/* See if a wildcarded connection can be found.
@@ -3991,6 +4006,21 @@ static void main_inI3_outR3_continue(struct adns_continuation *cr, err_t ugh)
 	key_continue(cr, ugh, main_inI3_outR3_tail);
 }
 
+/*
+ * Initialize RFC 3706 Dead Peer Detection
+ */
+static void dpd_init(struct state *st)
+{
+	connection_t *c = st->st_connection;
+	if (st->st_dpd && c->dpd_action != DPD_ACTION_NONE)
+	{
+		plog("Dead Peer Detection (RFC 3706) enabled");
+		/* randomize the first DPD event */
+		event_schedule(EVENT_DPD
+			, (0.5 + rand()/(RAND_MAX + 1.E0)) * c->dpd_delay, st);
+	}
+}
+
 static stf_status
 main_inI3_outR3_tail(struct msg_digest *md
 , struct key_continuation *kc)
@@ -4164,6 +4194,9 @@ main_inI3_outR3_tail(struct msg_digest *md
 	st->st_ph1_iv_len = st->st_new_iv_len;
 	set_ph1_iv(st, st->st_new_iv);
 
+	/* Start DPD if active */
+	dpd_init(st);
+
 	return STF_OK;
 }
 
@@ -4216,6 +4249,7 @@ static stf_status main_inR3_tail(struct msg_digest *md,
 
 
 	update_iv(st);      /* finalize our Phase 1 IV */
+	dpd_init(st);       /* Start DPD if active */
 
 	return STF_OK;
 }
@@ -4405,6 +4439,15 @@ stf_status quick_inI1_outR1(struct msg_digest *md)
 	b.md = md;
 	b.new_iv_len = p1st->st_new_iv_len;
 	memcpy(b.new_iv, p1st->st_new_iv, p1st->st_new_iv_len);
+
+	/* Hack for the iPhone 3G IPsec VPN client. It doesn't use
+	 * the IP address assigned via modecfg but proposes a
+	 * 0.0.0.0/0 client subnet for its side.
+	 */
+	if (isanyaddr(&b.his.net.addr)
+	&& !isanyaddr(&c->spd.that.host_srcip))
+		b.his.net = c->spd.that.client;
+
 	return quick_inI1_outR1_tail(&b, NULL);
 }
 
@@ -4786,12 +4829,19 @@ static stf_status quick_inI1_outR1_tail(struct verify_oppo_bundle *b,
 		*r_hashval,     /* where in reply to jam hash value */
 		*r_hash_start;  /* from where to start hashing */
 
+	const bool apply_l2tp_magic
+		= (b->my.port == 1701
+		&& p1st->nat_traversal
+		&& c->spd.that.host_port != NAT_T_IKE_FLOAT_PORT);
+
 	/* Now that we have identities of client subnets, we must look for
 	 * a suitable connection (our current one only matches for hosts).
 	 */
 	{
 		connection_t *p = find_client_connection(c
-			, our_net, his_net, b->my.proto, b->my.port, b->his.proto, b->his.port);
+			, our_net, his_net, b->my.proto, b->my.port, b->his.proto
+			, (apply_l2tp_magic ? c->spd.that.host_port : b->his.port)
+			, p1st->nat_traversal & NAT_T_DETECTED);
 
 		if (p == NULL)
 		{
@@ -4899,6 +4949,20 @@ static stf_status quick_inI1_outR1_tail(struct verify_oppo_bundle *b,
 
 					p = rw_instantiate(p, &c->spd.that.host_addr, md->sender_port
 								, his_net, c->spd.that.id);
+
+					/* NAT magic for L2TP clients */
+					if (apply_l2tp_magic)
+					{
+						u_int16_t magic_port = htons(c->spd.that.host_port);
+
+						setportof(magic_port, &p->spd.that.host_addr);
+						setportof(magic_port, &p->spd.that.client.addr);
+
+						p->l2tp_orig_port = (p->spd.that.has_port_wildcard
+									? b->his.port : p->spd.that.port);
+						p->spd.that.port = c->spd.that.host_port;
+						p->spd.that.has_port_wildcard = FALSE;
+					}
 
 					/* inherit any virtual IP assigned by a Mode Config exchange */ 
 					if (p->spd.that.modecfg && c->spd.that.modecfg &&
@@ -5147,18 +5211,7 @@ static stf_status quick_inI1_outR1_tail(struct verify_oppo_bundle *b,
 		/* Derive new keying material */
 		compute_keymats(st);
 
-		/* Tell the kernel to establish the new inbound SA
-		 * (unless the commit bit is set -- which we don't support).
-		 * We do this before any state updating so that
-		 * failure won't look like success.
-		 */
-		if (!install_inbound_ipsec_sa(st))
-		{
-			return STF_INTERNAL_ERROR;  /* ??? we may be partly committed */
-		}
-
 		/* encrypt message, except for fixed part of header */
-
 		if (!encrypt_message(&md->rbody, st))
 		{
 			return STF_INTERNAL_ERROR;  /* ??? we may be partly committed */
@@ -5169,25 +5222,26 @@ static stf_status quick_inI1_outR1_tail(struct verify_oppo_bundle *b,
 }
 
 /*
- * Initialize RFC 3706 Dead Peer Detection
+ * Initialize usage updates for RFC 3706 Dead Peer Detection
  */
-static void dpd_init(struct state *st)
+static void dpd_init_update(struct state *st)
 {
+	connection_t *c;
 	struct state *p1st = find_state(st->st_icookie, st->st_rcookie
 								, &st->st_connection->spd.that.host_addr, 0);
 
 	if (p1st == NULL)
 	{
 		loglog(RC_LOG_SERIOUS, "could not find phase 1 state for DPD");
+		return;
 	}
-	else if (p1st->st_dpd)
-	{
-		plog("Dead Peer Detection (RFC 3706) enabled");
-		/* randomize the first DPD event */
 
-		event_schedule(EVENT_DPD
-			, (0.5 + rand()/(RAND_MAX + 1.E0)) * st->st_connection->dpd_delay
-			, st);
+	c = p1st->st_connection;
+	if (p1st->st_dpd && c->dpd_action != DPD_ACTION_NONE)
+	{
+		/* randomize the first DPD_UPDATE event */
+		event_schedule(EVENT_DPD_UPDATE
+			, (0.5 + rand()/(RAND_MAX + 1.E0)) * c->dpd_delay, st);
 	}
 }
 
@@ -5325,7 +5379,7 @@ stf_status quick_inR1_outI2(struct msg_digest *md)
 	 * We do this before any state updating so that
 	 * failure won't look like success.
 	 */
-	if (!install_ipsec_sa(st, TRUE))
+	if (!install_ipsec_sas(st))
 	{
 		return STF_INTERNAL_ERROR;
 	}
@@ -5352,11 +5406,8 @@ stf_status quick_inR1_outI2(struct msg_digest *md)
 		c->gw_info->key->last_worked_time = now();
 	}
 
-	/* If we want DPD on this connection then initialize it */
-	if (st->st_connection->dpd_action != DPD_ACTION_NONE)
-	{
-		dpd_init(st);
-	}
+	dpd_init_update(st);
+
 	return STF_OK;
 }
 
@@ -5379,7 +5430,7 @@ stf_status quick_inI2(struct msg_digest *md)
 	 * We do this before any state updating so that
 	 * failure won't look like success.
 	 */
-	if (!install_ipsec_sa(st, FALSE))
+	if (!install_ipsec_sas(st))
 	{
 		return STF_INTERNAL_ERROR;
 	}
@@ -5405,11 +5456,8 @@ stf_status quick_inI2(struct msg_digest *md)
 		}
 	}
 
-	/* If we want DPD on this connection then initialize it */
-	if (st->st_connection->dpd_action != DPD_ACTION_NONE)
-	{
-		dpd_init(st);
-	}
+	dpd_init_update(st);
+
 	return STF_OK;
 }
 
@@ -5538,25 +5586,123 @@ static stf_status send_isakmp_notification(struct state *st, u_int16_t type,
 }
 
 /*
- * DPD Out Initiator
+ * DPD Timeout Function
+ *
+ * This function is called when a DPD timeout occurs.  We set clear/trap
+ * both the SA and the eroutes, depending on what the connection definition
+ * tells us (either 'hold' or 'clear')
  */
-void dpd_outI(struct state *p2st)
+static dpd_timeout(struct state *st)
 {
-	struct state *st;
-	u_int32_t seqno;
-	time_t tm;
-	time_t idle_time;
-	time_t delay = p2st->st_connection->dpd_delay;
-	time_t timeout = p2st->st_connection->dpd_timeout;
+	connection_t *c = st->st_connection;
+	int action = st->st_connection->dpd_action;
 
-	/* find the newest related Phase 1 state */
-	st = find_phase1_state(p2st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
+	passert(action == DPD_ACTION_HOLD
+		 || action == DPD_ACTION_CLEAR
+		 || action == DPD_ACTION_RESTART);
 
-	if (st == NULL)
+	loglog(RC_LOG_SERIOUS, "DPD: No response from peer - declaring peer dead");
+
+	switch (action)
 	{
-		loglog(RC_LOG_SERIOUS, "DPD: Could not find newest phase 1 state");
+	case DPD_ACTION_HOLD:
+		/* dpdaction=hold - Wipe the SA's but %trap the eroute so we don't
+		 * leak traffic.  Also, being in %trap means new packets will
+		 * force an initiation of the conn again.
+		 */
+		/* delete the state, which is probably in phase 2 */
+		set_cur_connection(c);
+		plog("DPD: Terminating all SAs using this connection");
+		delete_states_by_connection(c, TRUE);
+		reset_cur_connection();
+		loglog(RC_LOG_SERIOUS, "DPD: Putting connection \"%s\" into %%trap", c->name);
+		if (c->kind == CK_INSTANCE)
+		{
+			delete_connection(c, TRUE);
+		}
+		break;
+	case DPD_ACTION_CLEAR:
+		/* dpdaction=clear - Wipe the SA & eroute - everything */
+		/* delete the state, which is probably in phase 2 */
+		set_cur_connection(c);
+		plog("DPD: Terminating all SAs using this connection");
+		delete_states_by_connection(c, TRUE);
+		reset_cur_connection();
+		loglog(RC_LOG_SERIOUS, "DPD: Clearing connection \"%s\"", c->name);
+		unroute_connection(c);
+		if (c->kind == CK_INSTANCE)
+		{
+			delete_connection(c, TRUE);
+		}
+		break;
+	case DPD_ACTION_RESTART:
+		/* dpdaction=restart - Restart connection,
+		 * except if roadwarrior connection
+		 */
+		/* Terminate connection if this is for a dynamic endpoint */
+		if (c->kind == CK_INSTANCE)
+		{
+			/* delete the state, which is probably in phase 2 */
+			plog("DPD: Terminating all SAs using this connection");
+			delete_connection(c, TRUE);
+		}
+		else
+		{
+			loglog(RC_LOG_SERIOUS, "DPD: Restarting all connections of peer");
+			reinitiate_all_by_peer(&c->spd.that.host_addr);
+		}
+		break;
+	default:
+		loglog(RC_LOG_SERIOUS, "DPD: unknown action");
+	}
+}
+
+/*
+ * Update phase 1 state when phase 2 was used
+ */
+void dpd_update(struct state *p2st)
+{
+	connection_t *c = p2st->st_connection;
+	struct state *p1st;
+	time_t idle_time;
+	bool p2_idle;
+
+	/* If no DPD, then get out of here */
+	if (!p2st->st_dpd)
+	{
 		return;
 	}
+
+	/* Get SA usage information from kernel */
+	p2_idle = was_eroute_idle(p2st, c->dpd_delay, &idle_time);
+
+	/* Find the newest related Phase 1 state */
+	p1st = find_state_by_phase(c, ISAKMP_SA_ESTABLISHED_STATES);
+	if (!p1st && p2_idle)
+	{
+		loglog(RC_LOG_SERIOUS, "DPD: Could not find newest phase 1 state");
+		dpd_timeout(p2st);
+		return;
+	}
+
+	/* Schedule the next periodic update event */
+	event_schedule(EVENT_DPD_UPDATE, c->dpd_delay, p2st);
+
+	/* Update DPD information in phase 1 state */
+	if (!p2_idle && p1st)
+	{
+		p1st->st_dpd_lastactive = now() - idle_time;
+	}
+}
+
+/*
+ * DPD Out Initiator
+ */
+void dpd_outI(struct state *st)
+{
+	u_int32_t seqno;
+	time_t tm = now();
+	time_t delay = st->st_connection->dpd_delay;
 
 	/* If no DPD, then get out of here */
 	if (!st->st_dpd)
@@ -5564,41 +5710,46 @@ void dpd_outI(struct state *p2st)
 		return;
 	}
 
-	/* schedule the next periodic DPD event */
-	event_schedule(EVENT_DPD, delay, p2st);
-
-	/* Current time */
-	tm = now();
-
-	/* Make sure we really need to invoke DPD */
-	if (!was_eroute_idle(p2st, delay, &idle_time))
+	if (!IS_ISAKMP_SA_ESTABLISHED(st->st_state))
 	{
-		DBG(DBG_CONTROL,
-			DBG_log("recent eroute activity %u seconds ago, "
-					"no need to send DPD notification"
-				  , (int)idle_time)
-		)
-		st->st_last_dpd = tm;
-		delete_dpd_event(st);
-		return;
+		goto schedule_next;
 	}
 
-	/* If an R_U_THERE has been sent or received recently, or if a
+	/* If an R_U_THERE has been received recently or if a
 	 * companion Phase 2 SA has shown eroute activity,
 	 * then we don't need to invoke DPD.
 	 */
-	if (tm < st->st_last_dpd + delay)
+	if (tm < st->st_dpd_lastactive + delay)
 	{
 		DBG(DBG_CONTROL,
 			DBG_log("recent DPD activity %u seconds ago, "
 					"no need to send DPD notification"
-				  , (int)(tm - st->st_last_dpd))
+				  , (int)(tm - st->st_dpd_lastactive))
 		)
-		return;
+		st->st_dpd_timeout = 0;
+		goto schedule_next;
 	}
 
-	if (!IS_ISAKMP_SA_ESTABLISHED(st->st_state))
+	/* If there was no recent activity and the peer didn't reply
+	 * to any R_U_THERE we sent: invoke the configured DPD action.
+	 */
+	if (st->st_dpd_timeout && st->st_dpd_timeout <= tm)
+	{
+		/* Is there a newer phase1 state? */
+		struct state *newest_phase1_st =
+			find_state_by_phase(st->st_connection, ISAKMP_SA_ESTABLISHED_STATES);
+		if (newest_phase1_st && newest_phase1_st != st)
+		{
+			plog("DPD: Phase1 state #%ld has been superseded by #%ld"
+				" - timeout ignored"
+				, st->st_serialno, newest_phase1_st->st_serialno);
+		}
+		else
+		{
+			dpd_timeout(st);
+		}
 		return;
+	}
 
 	if (!st->st_dpd_seqno)
 	{
@@ -5616,21 +5767,35 @@ void dpd_outI(struct state *p2st)
 	if (send_isakmp_notification(st, R_U_THERE, &seqno, sizeof(seqno)) != STF_IGNORE)
 	{
 		loglog(RC_LOG_SERIOUS, "DPD: Could not send R_U_THERE");
-		return;
+		goto schedule_next;
 	}
 	DBG(DBG_CONTROL,
 		DBG_log("sent DPD notification R_U_THERE with seqno = %u", st->st_dpd_seqno)
 	)
 	st->st_dpd_expectseqno = st->st_dpd_seqno++;
-	st->st_last_dpd = tm;
-	/* Only schedule a new timeout if there isn't one currently,
-	 * or if it would be sooner than the current timeout. */
-	if (st->st_dpd_event == NULL
-	|| st->st_dpd_event->ev_time > tm + timeout)
+
+	/* Set the time this peer should be declared dead. */
+	if (!st->st_dpd_timeout)
 	{
-		delete_dpd_event(st);
-		event_schedule(EVENT_DPD_TIMEOUT, timeout, st);
+		st->st_dpd_timeout = tm + st->st_connection->dpd_timeout;
 	}
+
+	/* Adjust the delay according to the timeout. */
+	if (st->st_dpd_timeout < tm + delay)
+	{
+		delay = st->st_dpd_timeout - tm;
+	}
+
+	/* HA System: Time to sync DPD seqno
+	 * No need for as responder, because lower values are ok.
+	 * However this function if called will sync peerseqno as well.
+	 */
+	if (ha_master == 1)
+		do_sync_dpd(st);
+
+schedule_next:
+	/* Schedule the next DPD event. */
+	event_schedule(EVENT_DPD, delay, st);
 }
 
 /*
@@ -5639,7 +5804,7 @@ void dpd_outI(struct state *p2st)
 stf_status
 dpd_inI_outR(struct state *st, struct isakmp_notification *const n, pb_stream *pbs)
 {
-   time_t tm = now();
+	time_t tm = now();
 	u_int32_t seqno;
 
 	if (st == NULL || !IS_ISAKMP_SA_ESTABLISHED(st->st_state))
@@ -5653,23 +5818,11 @@ dpd_inI_outR(struct state *st, struct isakmp_notification *const n, pb_stream *p
 		return STF_FAIL + ISAKMP_PAYLOAD_MALFORMED;
 	}
 
-	if (memcmp(pbs->cur, st->st_icookie, COOKIE_SIZE) != 0)
-	{
-#ifdef APPLY_CRISCO
-		/* Ignore it, cisco sends odd icookies */
-#else
-		loglog(RC_LOG_SERIOUS, "DPD: R_U_THERE has invalid icookie (broken Cisco?)");
-		return STF_FAIL + ISAKMP_INVALID_COOKIE;
-#endif
-	}
-	pbs->cur += COOKIE_SIZE;
-
-	if (memcmp(pbs->cur, st->st_rcookie, COOKIE_SIZE) != 0)
-	{
-		loglog(RC_LOG_SERIOUS, "DPD: R_U_THERE has invalid rcookie (broken Cisco?)");
-		return STF_FAIL + ISAKMP_INVALID_COOKIE;
-	}
-	pbs->cur += COOKIE_SIZE;
+	/* Don't check cookies as RFC 3706 does not
+	 * require them to be set correctly and
+	 * Cisco PIXs tend to send crap here.
+	 */
+	pbs->cur += COOKIE_SIZE * 2;
 
 	if (pbs_left(pbs) != sizeof(seqno))
 	{
@@ -5689,7 +5842,7 @@ dpd_inI_outR(struct state *st, struct isakmp_notification *const n, pb_stream *p
 	}
 
 	st->st_dpd_peerseqno = seqno;
-	delete_dpd_event(st);
+	st->st_dpd_lastactive = tm;
 
 	if (send_isakmp_notification(st, R_U_THERE_ACK, pbs->cur, pbs_left(pbs)) != STF_IGNORE)
 	{
@@ -5700,7 +5853,6 @@ dpd_inI_outR(struct state *st, struct isakmp_notification *const n, pb_stream *p
 		DBG_log("sent DPD notification R_U_THERE_ACK with seqno = %u", seqno)
 	)
 
-	st->st_last_dpd = tm;
 	return STF_IGNORE;
 }
 
@@ -5719,7 +5871,7 @@ stf_status dpd_inR(struct state *st, struct isakmp_notification *const n,
 		return STF_FAIL;
 	}
 
-   if (n->isan_spisize != COOKIE_SIZE * 2 || pbs_left(pbs) < COOKIE_SIZE * 2)
+	if (n->isan_spisize != COOKIE_SIZE * 2 || pbs_left(pbs) < COOKIE_SIZE * 2)
 	{
 		loglog(RC_LOG_SERIOUS
 			, "DPD: R_U_THERE_ACK has invalid SPI length (%d)"
@@ -5727,27 +5879,11 @@ stf_status dpd_inR(struct state *st, struct isakmp_notification *const n,
 		return STF_FAIL + ISAKMP_PAYLOAD_MALFORMED;
 	}
 
-	if (memcmp(pbs->cur, st->st_icookie, COOKIE_SIZE) != 0)
-	{
-#ifdef APPLY_CRISCO
-		/* Ignore it, cisco sends odd icookies */
-#else
-		loglog(RC_LOG_SERIOUS, "DPD: R_U_THERE_ACK has invalid icookie");
-		return STF_FAIL + ISAKMP_INVALID_COOKIE;
-#endif
-	}
-	pbs->cur += COOKIE_SIZE;
-
-	if (memcmp(pbs->cur, st->st_rcookie, COOKIE_SIZE) != 0)
-	{
-#ifdef APPLY_CRISCO
-		/* Ignore it, cisco sends odd icookies */
-#else
-		loglog(RC_LOG_SERIOUS, "DPD: R_U_THERE_ACK has invalid rcookie");
-		return STF_FAIL + ISAKMP_INVALID_COOKIE;
-#endif
-	}
-	pbs->cur += COOKIE_SIZE;
+	/* Don't check cookies as RFC 3706 does not
+	 * require them to be set correctly and
+	 * Cisco PIXs tend to send crap here.
+	 */
+	pbs->cur += COOKIE_SIZE * 2;
 
 	if (pbs_left(pbs) != sizeof(seqno))
 	{
@@ -5772,87 +5908,7 @@ stf_status dpd_inR(struct state *st, struct isakmp_notification *const n,
 	}
 
 	st->st_dpd_expectseqno = 0;
-	delete_dpd_event(st);
+	st->st_dpd_timeout = 0;
 	return STF_IGNORE;
-}
-
-/*
- * DPD Timeout Function
- *
- * This function is called when a timeout DPD_EVENT occurs.  We set clear/trap
- * both the SA and the eroutes, depending on what the connection definition
- * tells us (either 'hold' or 'clear')
- */
-void
-dpd_timeout(struct state *st)
-{
-	struct state *newest_phase1_st;
-	connection_t *c = st->st_connection;
-	int action = st->st_connection->dpd_action;
-	char cname[BUF_LEN];
-
-	passert(action == DPD_ACTION_HOLD
-		 || action == DPD_ACTION_CLEAR
-		 || DPD_ACTION_RESTART);
-
-	/* is there a newer phase1_state? */
-	newest_phase1_st = find_phase1_state(c, ISAKMP_SA_ESTABLISHED_STATES);
-	if (newest_phase1_st != NULL && newest_phase1_st != st)
-	{
-		plog("DPD: Phase1 state #%ld has been superseded by #%ld"
-			 " - timeout ignored"
-			 , st->st_serialno, newest_phase1_st->st_serialno);
-		return;
-	}
-
-	loglog(RC_LOG_SERIOUS, "DPD: No response from peer - declaring peer dead");
-
-	/* delete the state, which is probably in phase 2 */
-	set_cur_connection(c);
-	plog("DPD: Terminating all SAs using this connection");
-	delete_states_by_connection(c, TRUE);
-	reset_cur_connection();
-
-	switch (action)
-	{
-	case DPD_ACTION_HOLD:
-		/* dpdaction=hold - Wipe the SA's but %trap the eroute so we don't
-		 * leak traffic.  Also, being in %trap means new packets will
-		 * force an initiation of the conn again.
-		 */
-		loglog(RC_LOG_SERIOUS, "DPD: Putting connection \"%s\" into %%trap", c->name);
-		if (c->kind == CK_INSTANCE)
-		{
-			delete_connection(c, TRUE);
-		}
-		break;
-	case DPD_ACTION_CLEAR:
-		/* dpdaction=clear - Wipe the SA & eroute - everything */
-		loglog(RC_LOG_SERIOUS, "DPD: Clearing connection \"%s\"", c->name);
-		unroute_connection(c);
-		if (c->kind == CK_INSTANCE)
-		{
-			delete_connection(c, TRUE);
-		}
-		break;
-	case DPD_ACTION_RESTART:
-		/* dpdaction=restart - Restart connection,
-		 * except if roadwarrior connection
-		 */
-		loglog(RC_LOG_SERIOUS, "DPD: Restarting connection \"%s\"", c->name);
-		unroute_connection(c);
-
-		/* caching the connection name before deletion */
-		strncpy(cname, c->name, BUF_LEN);
-
-		if (c->kind == CK_INSTANCE)
-		{
-			delete_connection(c, TRUE);
-		}
-		initiate_connection(cname, NULL_FD);
-		break;
-	default:
-		loglog(RC_LOG_SERIOUS, "DPD: unknown action");
-	}
 }
 

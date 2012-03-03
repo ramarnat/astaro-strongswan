@@ -18,6 +18,7 @@
 #include "xauth_plugin.h"
 #include "xauth_default_provider.h"
 #include "xauth_default_verifier.h"
+#include "xauth_aua_verifier.h"
 /**
  * Implementation of plugin_t.destroy
  */
@@ -37,6 +38,7 @@ plugin_t *xauth_plugin_create()
 
 	pluto->xauth->add_provider(pluto->xauth, xauth_default_provider_create());
 	pluto->xauth->add_verifier(pluto->xauth, xauth_default_verifier_create());
+	pluto->xauth->add_verifier(pluto->xauth, xauth_aua_verifier_create());
 
 	return &this->plugin;
 }

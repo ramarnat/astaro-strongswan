@@ -199,9 +199,11 @@ out:
  * ML: make F_STRICT logic consider enc,auth algorithms
  */
 bool kernel_alg_esp_ok_final(u_int ealg, u_int key_len, u_int aalg,
-							 struct alg_info_esp *alg_info)
+							 struct alg_info_esp *alg_info, u_int16_t *aalg_trunc)
 {
 	int ealg_insecure;
+	int strict_policy = 0;
+	int matching_policy = 0;
 
 	/*
 	 * key_len passed comes from esp_attrs read from peer
@@ -213,35 +215,46 @@ bool kernel_alg_esp_ok_final(u_int ealg, u_int key_len, u_int aalg,
 		key_len = kernel_alg_esp_enc_keylen(ealg) * BITS_PER_BYTE;
 
 	/*
+	 * try to find a matching ipsec policy
+	 */
+	if (alg_info)
+	{
+		int i;
+		struct esp_info *esp_info;
+
+		strict_policy = (alg_info->alg_info_flags & ALG_INFO_F_STRICT);
+
+		ALG_INFO_ESP_FOREACH(alg_info, esp_info, i)
+		{
+			if (esp_info->esp_ealg_id == ealg
+			&& (esp_info->esp_ealg_keylen == 0 || key_len == 0
+				|| esp_info->esp_ealg_keylen == key_len)
+			&&  esp_info->esp_aalg_id == aalg)
+			{
+				matching_policy = 1;
+				*aalg_trunc = esp_info->esp_aalg_keylen_trunc;
+				break;
+			}
+		}
+	}
+
+	/*
 	 * simple test to toss low key_len, will accept it only
 	 * if specified in "esp" string
 	 */
 	ealg_insecure = (key_len < 128) ;
 
-	if (ealg_insecure
-	|| (alg_info && alg_info->alg_info_flags & ALG_INFO_F_STRICT))
+	if (ealg_insecure || strict_policy)
 	{
-		int i;
-		struct esp_info *esp_info;
-
-		if (alg_info)
+		if (matching_policy)
 		{
-			ALG_INFO_ESP_FOREACH(alg_info, esp_info, i)
+			if (ealg_insecure)
 			{
-				if (esp_info->esp_ealg_id == ealg
-				&& (esp_info->esp_ealg_keylen == 0 || key_len == 0
-					|| esp_info->esp_ealg_keylen == key_len)
-				&&  esp_info->esp_aalg_id == aalg)
-				{
-					if (ealg_insecure)
-					{
-						loglog(RC_LOG_SERIOUS
-							, "You should NOT use insecure ESP algorithms [%s (%d)]!"
-							, enum_name(&esp_transform_names, ealg), key_len);
-					}
-					return TRUE;
-				}
+				loglog(RC_LOG_SERIOUS
+					, "You should NOT use insecure ESP algorithms [%s (%d)]!"
+					, enum_name(&esp_transform_names, ealg), key_len);
 			}
+			return TRUE;
 		}
 		plog("IPSec Transform [%s (%d), %s] refused due to %s",
 				enum_name(&esp_transform_names, ealg), key_len,
@@ -400,16 +413,6 @@ void kernel_alg_register_pfkey(const struct sadb_msg *msg_buf, int buflen)
 				alg.sadb_alg_id = SADB_X_EALG_NULL_AES_GMAC;
 				kernel_alg_add(satype, supp_exttype, &alg);
 			}
-			/* if SHA2_256 is registered then also register SHA2_256_96 */
-			if (satype == SADB_SATYPE_ESP &&
-				supp_exttype == SADB_EXT_SUPPORTED_AUTH &&
-				sadb.alg->sadb_alg_id == SADB_X_AALG_SHA2_256HMAC)
-			{
-				struct sadb_alg alg = *sadb.alg;
-
-				alg.sadb_alg_id = SADB_X_AALG_SHA2_256_96HMAC;
-				kernel_alg_add(satype, supp_exttype, &alg);
-			}
 		}
 	}
 }
@@ -515,10 +518,17 @@ void kernel_alg_show_connection(connection_t *c, const char *instance)
 	if (st && st->st_esp.present)
 	{
 		const char *aalg_name, *pfsgroup_name;
+		char aalg_trunc[5] = "";
 
 		aalg_name = (c->policy & POLICY_AUTHENTICATE) ?
 					enum_show(&ah_transform_names, st->st_ah.attrs.transid):
 					enum_show(&auth_alg_names, st->st_esp.attrs.auth);
+		if (st->st_esp.attrs.auth_trunc)
+		{
+			snprintf(aalg_trunc, sizeof(aalg_trunc), "_%d",
+					 st->st_esp.attrs.auth_trunc);
+			aalg_trunc[sizeof(aalg_trunc) - 1] = '\0';
+		}
 
 		pfsgroup_name = (c->policy & POLICY_PFS) ?
 						(c->alg_info_esp && c->alg_info_esp->esp_pfsgroup) ?
@@ -528,19 +538,19 @@ void kernel_alg_show_connection(connection_t *c, const char *instance)
 
 		if (st->st_esp.attrs.key_len)
 		{
-			whack_log(RC_COMMENT, "\"%s\"%s:   ESP%s proposal: %s_%u/%s/%s",
+			whack_log(RC_COMMENT, "\"%s\"%s:   ESP%s proposal: %s_%u/%s%s/%s",
 				c->name, instance,
 				(st->st_ah.present) ? "/AH" : "",
 				enum_show(&esp_transform_names, st->st_esp.attrs.transid),
-				st->st_esp.attrs.key_len, aalg_name, pfsgroup_name);
+				st->st_esp.attrs.key_len, aalg_name, aalg_trunc, pfsgroup_name);
 		}
 		else
 		{
-			whack_log(RC_COMMENT, "\"%s\"%s:   ESP%s proposal: %s/%s/%s",
+			whack_log(RC_COMMENT, "\"%s\"%s:   ESP%s proposal: %s/%s%s/%s",
 				c->name, instance,
 				(st->st_ah.present) ? "/AH" : "",
 				enum_show(&esp_transform_names, st->st_esp.attrs.transid),
-				aalg_name, pfsgroup_name);
+				aalg_name, aalg_trunc, pfsgroup_name);
 		}
 	}
 }

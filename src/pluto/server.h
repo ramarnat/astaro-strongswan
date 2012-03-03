@@ -54,3 +54,9 @@ extern void call_server(void);
 /* in rcv_info.c */
 extern err_t init_info_socket(void);
 extern void delete_info_socket(void);
+
+int add_ha_vips(char *);
+int open_ha_iface(void);
+void close_ha_iface(void);
+int listen_ha_vips(void);
+void unlisten_ha_vips(void);

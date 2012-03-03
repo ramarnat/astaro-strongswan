@@ -28,6 +28,8 @@
 #include <asn1/asn1.h>
 #include <crypto/hashers/hasher.h>
 
+static char hexdig_upper[] = "0123456789ABCDEF";
+
 ENUM_BEGIN(id_match_names, ID_MATCH_NONE, ID_MATCH_MAX_WILDCARDS,
 	"MATCH_NONE",
 	"MATCH_ANY",
@@ -274,9 +276,95 @@ METHOD(identification_t, create_part_enumerator, enumerator_t*,
 }
 
 /**
+ * Replace non-printable and special characters by octal shell escape sequences
+ */
+static int escape_shell_var(const chunk_t id, char *dst, size_t dstlen)
+{
+	const char *src = id.ptr;
+	const size_t srclen = id.len;
+	size_t srcpos = 0, dstpos = 0;
+
+	while (dstpos < dstlen && srcpos < srclen && src[srcpos] != '\0')
+	{
+		const char octet = src[srcpos];
+		if (!isprint(octet) || octet == '\'' || octet == '\\' ||
+			octet == '"' || octet == '`' || octet == '$')
+		{
+			const size_t octets_left = dstlen - dstpos;
+			if (octets_left < 5)
+			{
+				break;
+			}
+
+			dst[dstpos++] = '\\';
+			dst[dstpos++] = '0' + ((octet & 0300) / 0100);
+			dst[dstpos++] = '0' + ((octet &  070) /  010);
+			dst[dstpos++] = '0' +  (octet &   07);
+		}
+		else
+		{
+			dst[dstpos++] = octet;
+		}
+		++srcpos;
+	}
+
+	dstlen = dstpos < dstlen ? dstpos : dstlen - 1;
+	dst[dstlen] = '\0';
+	return dstlen;
+}
+
+/**
+ * Escape a RDN string according to the rules in RFC 4514.
+ */
+static int escape_rdn(const chunk_t rdn, char *dst, size_t dstlen)
+{
+	const char *src = rdn.ptr;
+	const size_t srclen = rdn.len;
+	size_t srcpos = 0, dstpos = 0;
+
+	while (dstpos < dstlen && srcpos < srclen)
+	{
+		const char octet = src[srcpos];
+		const size_t octets_left = dstlen - dstpos;
+
+		if (srcpos == 0          && (octet == ' ' || octet == '#')        ||
+			srcpos == srclen - 1 &&  octet == ' '                         ||
+			octet == ',' || octet == ';' || octet == '"' || octet == '\\' ||
+			octet == '<' || octet == '>' || octet == '+')
+		{
+			if (octets_left < 3)
+			{
+				break;
+			}
+			dst[dstpos++] = '\\';
+			dst[dstpos++] = octet;
+		}
+		else if (octet < ' ' || octet > '~')
+		{
+			if (octets_left < 4)
+			{
+				break;
+			}
+			dst[dstpos++] = '\\';
+			dst[dstpos++] = hexdig_upper[(octet >> 4) & 0xF];
+			dst[dstpos++] = hexdig_upper[ octet       & 0xF];
+		}
+		else
+		{
+			dst[dstpos++] = octet;
+		}
+		++srcpos;
+	}
+
+	dstlen = dstpos < dstlen ? dstpos : dstlen - 1;
+	dst[dstlen] = '\0';
+	return dstlen;
+}
+
+/**
  * Print a DN with all its RDN in a buffer to present it to the user
  */
-static void dntoa(chunk_t dn, char *buf, size_t len)
+static void dntoa(chunk_t dn, char *buf, size_t len, int escape)
 {
 	enumerator_t *e;
 	chunk_t oid_data, data, printable;
@@ -297,18 +385,40 @@ static void dntoa(chunk_t dn, char *buf, size_t len)
 		{
 			written = snprintf(buf, len,"%s=", oid_names[oid].name);
 		}
+		if (written >= len)
+		{
+			len = 0;
+			break;
+		}
 		buf += written;
 		len -= written;
 
-		chunk_printable(data, &printable, '?');
-		written = snprintf(buf, len, "%.*s", printable.len, printable.ptr);
-		chunk_free(&printable);
+		if (escape)
+		{
+			written = escape_rdn(data, buf, len);
+		}
+		else
+		{
+			chunk_printable(data, &printable, '?');
+			written = snprintf(buf, len, "%.*s", printable.len, printable.ptr);
+			chunk_free(&printable);
+			if (written >= len)
+			{
+				len = 0;
+				break;
+			}
+		}
 		buf += written;
 		len -= written;
 
 		if (data.ptr + data.len != dn.ptr + dn.len)
 		{
 			written = snprintf(buf, len, ", ");
+			if (written >= len)
+			{
+				len = 0;
+				break;
+			}
 			buf += written;
 			len -= written;
 		}
@@ -762,12 +872,19 @@ int identification_printf_hook(char *dst, size_t len, printf_hook_spec_t *spec,
 		case ID_RFC822_ADDR:
 		case ID_DER_ASN1_GN_URI:
 		case ID_IETF_ATTR_STRING:
-			chunk_printable(this->encoded, &proper, '?');
-			snprintf(buf, sizeof(buf), "%.*s", proper.len, proper.ptr);
-			chunk_free(&proper);
+			if (spec->hash)
+			{
+				escape_shell_var(this->encoded, buf, sizeof(buf));
+			}
+			else
+			{
+				chunk_printable(this->encoded, &proper, '?');
+				snprintf(buf, sizeof(buf), "%.*s", proper.len, proper.ptr);
+				chunk_free(&proper);
+			}
 			break;
 		case ID_DER_ASN1_DN:
-			dntoa(this->encoded, buf, sizeof(buf));
+			dntoa(this->encoded, buf, sizeof(buf), spec->hash);
 			break;
 		case ID_DER_ASN1_GN:
 			snprintf(buf, sizeof(buf), "(ASN.1 general Name");

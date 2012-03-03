@@ -29,6 +29,7 @@ typedef struct {
 	ip_address nexthop;
 } defaultroute_t;
 
+extern int get_ifindex(char *name);
 extern void get_defaultroute(defaultroute_t *defaultroute);
 
 

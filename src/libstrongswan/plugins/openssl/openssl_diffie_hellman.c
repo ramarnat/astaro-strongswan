@@ -58,6 +58,17 @@ struct private_openssl_diffie_hellman_t {
 };
 
 /**
+ * Implementation of openssl_diffie_hellman_t.get_my_private_value.
+ */
+static void get_my_private_value(private_openssl_diffie_hellman_t *this,
+								chunk_t *value)
+{
+	DBG1("Getting of Diffie Hellman private value not implemented for openssl");
+	value->len = 0;
+	value->ptr = NULL;
+}
+
+/**
  * Implementation of openssl_diffie_hellman_t.get_my_public_value.
  */
 static void get_my_public_value(private_openssl_diffie_hellman_t *this,
@@ -151,12 +162,21 @@ static void destroy(private_openssl_diffie_hellman_t *this)
 /*
  * Described in header.
  */
-openssl_diffie_hellman_t *openssl_diffie_hellman_create(diffie_hellman_group_t group)
+openssl_diffie_hellman_t *openssl_diffie_hellman_create(diffie_hellman_group_t group, chunk_t *xa)
 {
-	private_openssl_diffie_hellman_t *this = malloc_thing(private_openssl_diffie_hellman_t);
+	private_openssl_diffie_hellman_t *this;
+
+	if (xa)
+	{
+		DBG1("Setting of Diffie Hellman private value not implemented for openssl");
+		return NULL;
+	}
+
+	this = malloc_thing(private_openssl_diffie_hellman_t);
 
 	this->public.dh.get_shared_secret = (status_t (*)(diffie_hellman_t *, chunk_t *)) get_shared_secret;
 	this->public.dh.set_other_public_value = (void (*)(diffie_hellman_t *, chunk_t )) set_other_public_value;
+	this->public.dh.get_my_private_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_private_value;
 	this->public.dh.get_my_public_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_public_value;
 	this->public.dh.get_dh_group = (diffie_hellman_group_t (*)(diffie_hellman_t *)) get_dh_group;
 	this->public.dh.destroy = (void (*)(diffie_hellman_t *)) destroy;

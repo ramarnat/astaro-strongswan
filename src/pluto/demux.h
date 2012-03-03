@@ -22,6 +22,7 @@ extern void init_demux(void);
 extern bool send_packet(struct state *st, const char *where);
 extern void comm_handle(const struct iface *ifp);
 
+extern bool probe_psk;  /* --probe-psk? */
 extern u_int8_t reply_buffer[MAX_OUTPUT_UDP_SIZE];
 
 /* State transition function infrastructure

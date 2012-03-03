@@ -168,6 +168,7 @@ static void help(void)
 			" \\\n   "
 			" [--debug-none]"
 			" [--debug-all]"
+			" [--debug-ha]"
 			" \\\n   "
 			" [--debug-raw]"
 			" [--debug-crypt]"
@@ -224,6 +225,7 @@ static void help(void)
 			"\n\n"
 		"status: whack"
 			" [--name <connection_name>] --status|--statusall"
+			" [--ha_mode <init/slave/master/resync/incseq>]"
 			"\n\n"
 		"scdecrypt: whack"
 			" --scencrypt|scdecrypt <value>"
@@ -347,6 +349,8 @@ enum {
 	OPT_OPPO_HERE,
 	OPT_OPPO_THERE,
 
+	OPT_HA_MODE,
+
 	OPT_ASYNC,
 	OPT_DELETECRASH,
 
@@ -439,6 +443,7 @@ enum {
 	CD_DPDTIMEOUT,
 	CD_IKE,
 	CD_PFSGROUP,
+	CD_IPSECDEV,
 	CD_ESP,
 
 #   define CD_LAST CD_ESP       /* last connection description */
@@ -478,6 +483,9 @@ enum {
 	DBGOPT_CONTROLMORE, /* same order as DBG_* */
 
 	DBGOPT_PRIVATE,     /* same order as DBG_* */
+	DBGOPT_RES12,
+	DBGOPT_RES13,
+	DBGOPT_HA,          /* ok if you think so, same order as DBG_* */
 
 	DBGOPT_IMPAIR_DELAY_ADNS_KEY_ANSWER,        /* same order as IMPAIR_* */
 	DBGOPT_IMPAIR_DELAY_ADNS_TXT_ANSWER,        /* same order as IMPAIR_* */
@@ -543,6 +551,8 @@ static const struct option long_opts[] = {
 	{ "status", no_argument, NULL, OPT_STATUS + OO },
 	{ "statusall", no_argument, NULL, OPT_STATUSALL + OO },
 	{ "shutdown", no_argument, NULL, OPT_SHUTDOWN + OO },
+
+	{ "ha_mode", required_argument, NULL, OPT_HA_MODE + OO },
 
 	{ "oppohere", required_argument, NULL, OPT_OPPO_HERE + OO },
 	{ "oppothere", required_argument, NULL, OPT_OPPO_THERE + OO },
@@ -632,6 +642,7 @@ static const struct option long_opts[] = {
 	{ "rekeywindow", required_argument, NULL, CD_RKMARGIN + OO + NUMERIC_ARG }, /* OBSOLETE */
 	{ "rekeyfuzz", required_argument, NULL, CD_RKFUZZ + OO + NUMERIC_ARG },
 	{ "keyingtries", required_argument, NULL, CD_KTRIES + OO + NUMERIC_ARG },
+	{ "dev", required_argument, NULL, CD_IPSECDEV + OO + NUMERIC_ARG },
 	{ "dpdaction", required_argument, NULL, CD_DPDACTION + OO },
 	{ "dpddelay", required_argument, NULL, CD_DPDDELAY + OO + NUMERIC_ARG },
 	{ "dpdtimeout", required_argument, NULL, CD_DPDTIMEOUT + OO + NUMERIC_ARG },
@@ -665,6 +676,7 @@ static const struct option long_opts[] = {
 	{ "debug-oppo", no_argument, NULL, DBGOPT_OPPO + OO },
 	{ "debug-controlmore", no_argument, NULL, DBGOPT_CONTROLMORE + OO },
 	{ "debug-private", no_argument, NULL, DBGOPT_PRIVATE + OO },
+	{ "debug-ha", no_argument, NULL, DBGOPT_HA + OO },
 
 	{ "impair-delay-adns-key-answer", no_argument, NULL, DBGOPT_IMPAIR_DELAY_ADNS_KEY_ANSWER + OO },
 	{ "impair-delay-adns-txt-answer", no_argument, NULL, DBGOPT_IMPAIR_DELAY_ADNS_TXT_ANSWER + OO },
@@ -1485,6 +1497,10 @@ int main(int argc, char **argv)
 				msg.dpd_action = DPD_ACTION_UNKNOWN;
 			continue;
 
+		case CD_IPSECDEV:
+			msg.dev = opt_whole;
+			continue;
+
 		case CD_DPDDELAY:
 			msg.dpd_delay = opt_whole;
 			continue;
@@ -1580,6 +1596,29 @@ int main(int argc, char **argv)
 			msg.whack_strict = TRUE;
 			continue;
 
+		case OPT_HA_MODE:
+			if (0 == strcmp(optarg, "master")) {
+				msg.whack_ha_mode = TRUE;
+				msg.ha_master = 1;
+			}
+			else if (0 == strcmp(optarg, "slave")) {
+				msg.whack_ha_mode = TRUE;
+				msg.ha_master = 0;
+			}
+			else if (0 == strcmp(optarg, "init")) {
+				msg.whack_ha_mode = TRUE;
+				msg.ha_master = -1;
+			}
+			else if (0 == strcmp(optarg, "resync")) {
+				msg.whack_ha_mode = TRUE;
+				msg.ha_master = -2;
+			}
+			else if (0 == strcmp(optarg, "incseq")) {
+				msg.whack_ha_mode = TRUE;
+				msg.ha_master = -3;
+			}
+			continue;
+
 #ifdef DEBUG
 		case DBGOPT_NONE:       /* --debug-none */
 			msg.debugging = DBG_NONE;
@@ -1601,6 +1640,7 @@ int main(int argc, char **argv)
 		case DBGOPT_OPPO:       /* --debug-oppo */
 		case DBGOPT_CONTROLMORE: /* --debug-controlmore */
 		case DBGOPT_PRIVATE:    /* --debug-private */
+		case DBGOPT_HA:         /* --debug-ha */
 		case DBGOPT_IMPAIR_DELAY_ADNS_KEY_ANSWER:       /* --impair-delay-adns-key-answer */
 		case DBGOPT_IMPAIR_DELAY_ADNS_TXT_ANSWER:       /* --impair-delay-adns-txt-answer */
 		case DBGOPT_IMPAIR_BUST_MI2:    /* --impair_bust_mi2 */
@@ -1731,7 +1771,7 @@ int main(int argc, char **argv)
 	|| msg.whack_unlisten || msg.whack_list || msg.whack_purgeocsp
 	|| msg.whack_reread || msg.whack_ca || msg.whack_status
 	|| msg.whack_options || msg.whack_shutdown || msg.whack_sc_op
-	|| msg.whack_leases))
+	|| msg.whack_leases || msg.whack_ha_mode))
 	{
 		diag("no action specified; try --help for hints");
 	}

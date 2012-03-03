@@ -40,7 +40,7 @@ METHOD(xauth_verifier_t, verify_secret, bool,
 	server = c->spd.this.id;
 	user = (c->xauth_identity) ? c->xauth_identity : c->spd.that.id;
 
-	if (get_xauth_secret(user, server, &xauth_secret))
+	if (get_xauth_secret(c, user, server, &xauth_secret))
 	{
 		success = chunk_equals(secret, xauth_secret);
 		chunk_clear(&xauth_secret);

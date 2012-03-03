@@ -64,6 +64,7 @@
 #define FLAG_ACTION_QUIT          0x08
 #define FLAG_ACTION_LISTEN        0x10
 #define FLAG_ACTION_START_CHARON  0x20
+#define FLAG_ACTION_HA_MODE       0x40
 
 static unsigned int _action_ = 0;
 
@@ -153,6 +154,10 @@ static void fsig(int signal)
 		case SIGUSR1:
 			_action_ |= FLAG_ACTION_RELOAD;
 			_action_ |= FLAG_ACTION_UPDATE;
+			break;
+
+		case SIGUSR2:
+			_action_ |= FLAG_ACTION_HA_MODE;
 			break;
 
 		default:
@@ -297,6 +302,7 @@ int main (int argc, char **argv)
 	signal(SIGQUIT, fsig);
 	signal(SIGALRM, fsig);
 	signal(SIGUSR1, fsig);
+	signal(SIGUSR2, fsig);
 
 	plog("Starting strongSwan "VERSION" IPsec [starter]...");
 
@@ -602,6 +608,8 @@ int main (int argc, char **argv)
 				if (starter_start_pluto(cfg, no_fork, attach_gdb) == 0)
 				{
 					starter_whack_listen();
+					if (cfg->setup.ha_interface)
+						_action_ |= FLAG_ACTION_HA_MODE;
 				}
 				else
 				{
@@ -732,6 +740,16 @@ int main (int argc, char **argv)
 					}
 				}
 			}
+		}
+
+		/* Switch HA mode */
+		if (starter_pluto_pid() && _action_ & FLAG_ACTION_HA_MODE) {
+			_action_ &= ~FLAG_ACTION_HA_MODE;
+
+			if (access("/var/master", F_OK) == 0)
+				starter_whack_ha_mode(1);
+			else
+				starter_whack_ha_mode(0);
 		}
 
 		/*

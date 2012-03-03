@@ -135,6 +135,16 @@ static chunk_t export_mpi(gcry_mpi_t value, size_t len)
 }
 
 /**
+ * Implementation of openssl_diffie_hellman_t.get_my_private_value.
+ */
+static void get_my_private_value(private_gcrypt_dh_t *this, chunk_t *value)
+{
+	DBG1("Getting of Diffie Hellman private value not implemented for gcrypt");
+	value->len = 0;
+	value->ptr = NULL;
+}
+
+/**
  * Implementation of gcrypt_dh_t.get_my_public_value.
  */
 static void get_my_public_value(private_gcrypt_dh_t *this, chunk_t *value)
@@ -180,13 +190,19 @@ static void destroy(private_gcrypt_dh_t *this)
 /*
  * Described in header.
  */
-gcrypt_dh_t *gcrypt_dh_create(diffie_hellman_group_t group)
+gcrypt_dh_t *gcrypt_dh_create(diffie_hellman_group_t group, chunk_t *xa)
 {
 	private_gcrypt_dh_t *this;
 	diffie_hellman_params_t *params;
 	gcry_error_t err;
 	chunk_t random;
 	rng_t *rng;
+
+	if (xa)
+	{
+		DBG1("Setting of Diffie Hellman private value not implemented for gcrypt");
+		return NULL;
+	}
 
 	params = diffie_hellman_get_params(group);
 	if (!params)
@@ -198,6 +214,7 @@ gcrypt_dh_t *gcrypt_dh_create(diffie_hellman_group_t group)
 
 	this->public.dh.get_shared_secret = (status_t (*)(diffie_hellman_t *, chunk_t *)) get_shared_secret;
 	this->public.dh.set_other_public_value = (void (*)(diffie_hellman_t *, chunk_t )) set_other_public_value;
+	this->public.dh.get_my_private_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_private_value;
 	this->public.dh.get_my_public_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_public_value;
 	this->public.dh.get_dh_group = (diffie_hellman_group_t (*)(diffie_hellman_t *)) get_dh_group;
 	this->public.dh.destroy = (void (*)(diffie_hellman_t *)) destroy;

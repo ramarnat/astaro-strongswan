@@ -57,8 +57,8 @@ struct xfrm_selector
 	__u8	prefixlen_d;
 	__u8	prefixlen_s;
 	__u8	proto;
-	int	ifindex;
-	__kernel_uid32_t	user;
+	int	oif;
+	int	iif;
 };
 
 #define XFRM_INF (~(__u64)0)
@@ -291,6 +291,11 @@ enum xfrm_attr_type_t {
 	XFRMA_ALG_AEAD,		/* struct xfrm_algo_aead */
 	XFRMA_KMADDRESS,        /* struct xfrm_user_kmaddress */
 	XFRMA_ALG_AUTH_TRUNC,	/* struct xfrm_algo_auth */
+	XFRMA_RECV_DEV,
+	/*
+	 * Astaro specific xfrm attributes.
+	 */
+	XFRMA_L2TP_PORT = 500,  /* Follows __u16 l2tp port */
 	__XFRMA_MAX
 
 #define XFRMA_MAX (__XFRMA_MAX - 1)
@@ -459,11 +464,35 @@ struct xfrm_user_mapping {
 };
 
 #ifndef __KERNEL__
+/* Use XFRM_AEVENT_VERSION = 2 for 2.6.20+
+ * and XFRM_AEVENT_VERSION = 1 for 2.6.17 to 2.6.19
+ */
+#define XFRM_AEVENT_VERSION  2
+
+#if (XFRM_AEVENT_VERSION == 2)
+#  define xfrm_aevent_id  xfrm_aevent_id_2_6_20
+#else
+#  define xfrm_aevent_id  xfrm_aevent_id_2_6_17
+#endif
+
+struct xfrm_aevent_id_2_6_17 {
+	struct xfrm_usersa_id		sa_id;
+	__u32				flags;
+};
+
+struct xfrm_aevent_id_2_6_20 {
+	struct xfrm_usersa_id		sa_id;
+	xfrm_address_t			saddr;
+	__u32				flags;
+	__u32				reqid;
+};
+
 /* backwards compatibility for userspace */
 #define XFRMGRP_ACQUIRE		1
 #define XFRMGRP_EXPIRE		2
 #define XFRMGRP_SA		4
 #define XFRMGRP_POLICY		8
+#define XFRMGRP_AEVENTS		0x10
 #define XFRMGRP_REPORT		0x20
 #endif
 

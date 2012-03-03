@@ -20,6 +20,13 @@
 #include <credentials/keys/private_key.h>
 #include <credentials/keys/public_key.h>
 
+typedef struct secret_t secret_t;
+
+typedef struct {
+	secret_t *start;    /* start of secrets list */
+	secret_t *pos;      /* position in secrets list */
+} psk_list_t;
+
 #include "certs.h"
 #include "connections.h"
 
@@ -32,11 +39,15 @@ const char *shared_secrets_file;
 extern void load_preshared_secrets(int whackfd);
 extern void free_preshared_secrets(void);
 
+extern psk_list_t empty_psk_list;
+extern void free_psk_list(enum connection_kind kind, psk_list_t *psk_list);
+
 extern void xauth_defaults(void);
 
-extern bool get_xauth_secret(identification_t *user, identification_t *server,
-							 chunk_t *secret);
-extern const chunk_t *get_preshared_secret(const connection_t *c);
+extern bool get_xauth_secret(connection_t *c, identification_t *user,
+							 identification_t *server, chunk_t *secret);
+extern const chunk_t *get_preshared_secret(connection_t *c);
+extern const chunk_t *next_preshared_secret(connection_t *c);
 extern private_key_t *get_private_key(const connection_t *c);
 extern private_key_t *get_x509_private_key(const cert_t *cert);
 

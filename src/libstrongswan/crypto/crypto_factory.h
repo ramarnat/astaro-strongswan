@@ -60,7 +60,7 @@ typedef rng_t* (*rng_constructor_t)(rng_quality_t quality);
 /**
  * Constructor function for diffie hellman
  */
-typedef diffie_hellman_t* (*dh_constructor_t)(diffie_hellman_group_t group);
+typedef diffie_hellman_t* (*dh_constructor_t)(diffie_hellman_group_t group, chunk_t *xa);
 
 /**
  * Handles crypto modules and creates instances.
@@ -117,7 +117,8 @@ struct crypto_factory_t {
 	 * @return				diffie_hellman_t instance, NULL if not supported
 	 */
 	diffie_hellman_t* (*create_dh)(crypto_factory_t *this,
-								   diffie_hellman_group_t group);
+								   diffie_hellman_group_t group,
+								   chunk_t *xa);
 
 	/**
 	 * Register a crypter constructor.

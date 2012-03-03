@@ -40,9 +40,10 @@ struct gcrypt_dh_t {
  * Creates a new gcrypt_dh_t object.
  *
  * @param group			Diffie Hellman group number to use
+ * @param xa			Diffie Hellman private value to use
  * @return				gcrypt_dh_t object, NULL if not supported
  */
-gcrypt_dh_t *gcrypt_dh_create(diffie_hellman_group_t group);
+gcrypt_dh_t *gcrypt_dh_create(diffie_hellman_group_t group, chunk_t *xa);
 
 #endif /** GCRYPT_DH_H_ @}*/
 

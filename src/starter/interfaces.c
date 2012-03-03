@@ -38,6 +38,32 @@
 #endif
 
 /*
+ * Get the interface index
+ */
+int get_ifindex(char *name) {
+	int mysock;
+	struct ifreq my_ifreq;
+
+	memset(&my_ifreq, 0, sizeof(my_ifreq));
+	strncpy(my_ifreq.ifr_ifrn.ifrn_name, name, sizeof(my_ifreq.ifr_ifrn.ifrn_name));
+
+	mysock = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+	if (mysock < 0) {
+		plog("get_ifindex: failed to open socket");
+		return -1;
+	}
+
+	if (ioctl(mysock, SIOCGIFINDEX, &my_ifreq) < 0) {
+		plog("get_ifindex: failed to get ifindex for %s", name);
+		close(mysock);
+		return -1;
+	}
+
+	close(mysock);
+	return my_ifreq.ifr_ifindex;
+}
+
+/*
  * Get the default route information via rtnetlink
  */
 void

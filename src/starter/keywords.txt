@@ -30,6 +30,7 @@ charonstart,       KW_CHARONSTART
 plutostart,        KW_PLUTOSTART
 klipsdebug,        KW_KLIPSDEBUG
 plutodebug,        KW_PLUTODEBUG
+pluto_ikeport,     KW_PLUTO_IKEPORT
 charondebug,       KW_CHARONDEBUG
 prepluto,          KW_PREPLUTO
 postpluto,         KW_POSTPLUTO
@@ -37,6 +38,7 @@ plutostderrlog,    KW_PLUTOSTDERRLOG
 fragicmp,          KW_FRAGICMP
 packetdefault,     KW_PACKETDEFAULT
 hidetos,           KW_HIDETOS
+probe_psk,         KW_PROBE_PSK
 uniqueids,         KW_UNIQUEIDS
 overridemtu,       KW_OVERRIDEMTU
 crlcheckinterval,  KW_CRLCHECKINTERVAL
@@ -55,11 +57,17 @@ pkcs11module,      KW_PKCS11MODULE
 pkcs11initargs,    KW_PKCS11INITARGS
 pkcs11keepstate,   KW_PKCS11KEEPSTATE
 pkcs11proxy,       KW_PKCS11PROXY
+ha_interface,      KW_HA_INTERFACE
+ha_multicast,      KW_HA_MULTICAST
+ha_seqdiff_in,     KW_HA_SEQDIFF_IN
+ha_seqdiff_out,    KW_HA_SEQDIFF_OUT
 keyexchange,       KW_KEYEXCHANGE
 type,              KW_TYPE
 pfs,               KW_PFS
 compress,          KW_COMPRESS
 installpolicy,     KW_INSTALLPOLICY
+pmtu_discovery,    KW_PMTUDISC
+ecn,               KW_ECN
 auth,              KW_AUTH
 authby,            KW_AUTHBY
 keylife,           KW_KEYLIFE
@@ -78,6 +86,7 @@ reauth,            KW_REAUTH
 esp,               KW_ESP
 ike,               KW_IKE
 pfsgroup,          KW_PFSGROUP
+dev,               KW_IPSECDEV
 dpddelay,          KW_DPDDELAY
 dpdtimeout,        KW_DPDTIMEOUT
 dpdaction,         KW_DPDACTION

@@ -160,6 +160,14 @@ static void get_my_public_value(private_gmp_diffie_hellman_t *this,chunk_t *valu
 }
 
 /**
+ * Implementation of gmp_diffie_hellman_t.get_my_private_value.
+ */
+static void get_my_private_value(private_gmp_diffie_hellman_t *this,chunk_t *value)
+{
+	value->ptr = mpz_export(NULL, &value->len, 1, 1, 1, 0, this->xa);
+}
+
+/**
  * Implementation of gmp_diffie_hellman_t.get_shared_secret.
  */
 static status_t get_shared_secret(private_gmp_diffie_hellman_t *this, chunk_t *secret)
@@ -202,7 +210,7 @@ static void destroy(private_gmp_diffie_hellman_t *this)
 /*
  * Described in header.
  */
-gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group)
+gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group, chunk_t *xa)
 {
 	private_gmp_diffie_hellman_t *this;
 	diffie_hellman_params_t *params;
@@ -220,6 +228,7 @@ gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group)
 	/* public functions */
 	this->public.dh.get_shared_secret = (status_t (*)(diffie_hellman_t *, chunk_t *)) get_shared_secret;
 	this->public.dh.set_other_public_value = (void (*)(diffie_hellman_t *, chunk_t )) set_other_public_value;
+	this->public.dh.get_my_private_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_private_value;
 	this->public.dh.get_my_public_value = (void (*)(diffie_hellman_t *, chunk_t *)) get_my_public_value;
 	this->public.dh.get_dh_group = (diffie_hellman_group_t (*)(diffie_hellman_t *)) get_dh_group;
 	this->public.dh.destroy = (void (*)(diffie_hellman_t *)) destroy;
@@ -238,25 +247,32 @@ gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group)
 	mpz_import(this->p, params->prime.len, 1, 1, 1, 0, params->prime.ptr);
 	mpz_import(this->g, params->generator.len, 1, 1, 1, 0, params->generator.ptr);
 
-	rng = lib->crypto->create_rng(lib->crypto, RNG_STRONG);
-	if (!rng)
+	if (xa)
 	{
-		DBG1(DBG_LIB, "no RNG found for quality %N", rng_quality_names,
-			 RNG_STRONG);
-		destroy(this);
-		return NULL;
+		mpz_import(this->xa, xa->len, 1, 1, 1, 0, xa->ptr);
 	}
-
-	rng->allocate_bytes(rng, params->exp_len, &random);
-	rng->destroy(rng);
-
-	if (params->exp_len == this->p_len)
+	else
 	{
-		/* achieve bitsof(p)-1 by setting MSB to 0 */
-		*random.ptr &= 0x7F;
+		rng = lib->crypto->create_rng(lib->crypto, RNG_STRONG);
+		if (!rng)
+		{
+			DBG1(DBG_LIB, "no RNG found for quality %N",
+				 rng_quality_names, RNG_STRONG);
+			destroy(this);
+			return NULL;
+		}
+
+		rng->allocate_bytes(rng, params->exp_len, &random);
+		rng->destroy(rng);
+
+		if (params->exp_len == this->p_len)
+		{
+			/* achieve bitsof(p)-1 by setting MSB to 0 */
+			*random.ptr &= 0x7F;
+		}
+		mpz_import(this->xa, random.len, 1, 1, 1, 0, random.ptr);
+		chunk_free(&random);
 	}
-	mpz_import(this->xa, random.len, 1, 1, 1, 0, random.ptr);
-	chunk_free(&random);
 	DBG2(DBG_LIB, "size of DH secret exponent: %u bits",
 		 mpz_sizeinbase(this->xa, 2));
 

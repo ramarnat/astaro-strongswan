@@ -38,7 +38,7 @@ METHOD(xauth_provider_t, get_secret, bool,
 	server = c->spd.that.id;
 	user = (c->xauth_identity) ? c->xauth_identity : c->spd.this.id;
 
-	return get_xauth_secret(user, server, secret);
+	return get_xauth_secret(c, user, server, secret);
 }
 
 METHOD(xauth_provider_t, destroy, void,

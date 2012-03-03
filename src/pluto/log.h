@@ -14,7 +14,7 @@
 
 #include <freeswan.h>
 
-#define LOG_WIDTH   1024    /* roof of number of chars in log line */
+#define LOG_WIDTH   2048    /* roof of number of chars in log line */
 
 #ifndef PERPEERLOGDIR
 #define PERPEERLOGDIR "/var/log/pluto/peer"

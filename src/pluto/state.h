@@ -84,6 +84,7 @@ struct ipsec_trans_attrs {
 	u_int32_t life_kilobytes;   /* When this SA expires */
 	u_int16_t encapsulation;
 	u_int16_t auth;
+	u_int16_t auth_trunc;
 	u_int16_t key_len;
 	u_int16_t key_rounds;
 #if 0 /* not implemented yet */
@@ -223,10 +224,13 @@ struct state
 
 	u_int32_t         nat_traversal;
 	ip_address        nat_oa;
+	u_int16_t         nat_this_port;
+	u_int16_t         nat_that_port;
 
 	/* RFC 3706 Dead Peer Detection */
 	bool                st_dpd;                 /* Peer supports DPD */
-	time_t              st_last_dpd;            /* Time of last DPD transmit */
+	time_t              st_dpd_lastactive;      /* Time of last peer activity */
+	time_t              st_dpd_timeout;         /* Time peer will be declared dead */
 	u_int32_t           st_dpd_seqno;           /* Next R_U_THERE to send */
 	u_int32_t           st_dpd_expectseqno;     /* Next R_U_THERE_ACK to receive */
 	u_int32_t           st_dpd_peerseqno;       /* global variables */
@@ -262,7 +266,7 @@ extern struct state
 	*state_with_serialno(so_serial_t sn),
 	*find_phase2_state_to_delete(const struct state *p1st, u_int8_t protoid
 		, ipsec_spi_t spi, bool *bogus),
-	*find_phase1_state(const struct connection *c, lset_t ok_states),
+	*find_state_by_phase(const struct connection *c, lset_t ok_states),
 	*find_sender(size_t packet_len, u_char *packet);
 
 extern void show_states_status(bool all, const char *name);
@@ -273,5 +277,12 @@ extern void fmt_state(bool all, struct state *st, time_t n
 					 , char *state_buf, size_t state_buf_len
 					 , char *state_buf2, size_t state_buf_len2);
 extern void delete_states_by_peer(ip_address *peer);
+
+/* HA System functions */
+extern void state_sync_bulk(struct in_addr);
+extern void state_increase_oseq(void);
+extern void insert_dpd_events(void);
+extern void remove_dpd_events(void);
+/* End of HA System functions */
 
 #endif /* _STATE_H */

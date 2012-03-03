@@ -18,6 +18,7 @@
 #include <assert.h>
 
 #include <freeswan.h>
+#include <linux/xfrm.h>
 
 #include "../pluto/constants.h"
 #include "../pluto/defs.h"
@@ -67,6 +68,11 @@ static void default_values(starter_config_t *cfg)
 	cfg->setup.plutostart  = TRUE;
 #endif
 
+	cfg->setup.pluto_ikeport = IKE_UDP_PORT;
+
+	cfg->setup.ha_seqdiff_in  = 0xFFFFFFFF;
+	cfg->setup.ha_seqdiff_out = 0xFFFFFFFF;
+
 	cfg->conn_default.seen    = LEMPTY;
 	cfg->conn_default.startup = STARTUP_NO;
 	cfg->conn_default.state   = STATE_IGNORE;
@@ -82,7 +88,9 @@ static void default_values(starter_config_t *cfg)
 	cfg->conn_default.sa_keying_tries       = SA_REPLACEMENT_RETRIES_DEFAULT;
 	cfg->conn_default.addr_family           = AF_INET;
 	cfg->conn_default.tunnel_addr_family    = AF_INET;
+	cfg->conn_default.xfrm_flags            = 0;
 	cfg->conn_default.install_policy	= TRUE;
+	cfg->conn_default.dev			= 0;
 	cfg->conn_default.dpd_delay		=  30; /* seconds */
 	cfg->conn_default.dpd_timeout		= 150; /* seconds */
 
@@ -565,6 +573,24 @@ static void load_conn(starter_conn_t *conn, kw_list_t *kw, starter_config_t *cfg
 			break;
 		case KW_COMPRESS:
 			KW_POLICY_FLAG("yes", "no", POLICY_COMPRESS)
+			break;
+		case KW_PMTUDISC:
+			if (streq(kw->value, "no"))
+			{
+				conn->xfrm_flags |= XFRM_STATE_NOPMTUDISC;
+			}
+			break;
+		case KW_IPSECDEV:
+			conn->dev = get_ifindex(kw->value);
+			if (conn->dev < 0) {
+				cfg->err++;
+			}
+			break;
+		case KW_ECN:
+			if (streq(kw->value, "no"))
+			{
+				conn->xfrm_flags |= XFRM_STATE_NOECN;
+			}
 			break;
 		case KW_AUTH:
 			KW_POLICY_FLAG("ah", "esp", POLICY_AUTHENTICATE)

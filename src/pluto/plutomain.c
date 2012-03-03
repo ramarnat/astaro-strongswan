@@ -31,6 +31,7 @@
 #include <sys/prctl.h>
 #include <pwd.h>
 #include <grp.h>
+#include <sys/utsname.h>
 
 #ifdef CAPABILITIES
 #include <sys/capability.h>
@@ -76,6 +77,8 @@
 #include "builder.h"
 #include "whack_attribute.h"
 #include "pluto.h"
+#include "linux/xfrm.h"
+#include "sa_sync.h"
 
 static void usage(const char *mess)
 {
@@ -95,9 +98,15 @@ static void usage(const char *mess)
 			"[--strictcrlpolicy]"
 			" [--crlcheckinterval <interval>]"
 			" [--cachecrls]"
+			" [--probe-psk]"
 			" [--uniqueids]"
 			" \\\n\t"
 			"[--interface <ifname>]"
+			" [--ha_interface <ifname>]"
+			" [--ha_multicast <multicast ip>]"
+			" [--ha_vips <ip addresses>]"
+			" [--ha_seqdiff_in <diff>]"
+			" [--ha_seqdiff_out <diff>]"
 			" [--ikeport <port-number>]"
 			" \\\n\t"
 			"[--ctlbase <path>]"
@@ -115,6 +124,7 @@ static void usage(const char *mess)
 			" \\\n\t"
 			"[--debug-none]"
 			" [--debug-all]"
+			" [--debug-ha]"
 			" \\\n\t"
 			"[--debug-raw]"
 			" [--debug-crypt]"
@@ -142,6 +152,31 @@ static void usage(const char *mess)
 	exit_pluto(mess == NULL? 0 : 1);
 }
 
+/* Needed for xfrm_aevent_id ABI change
+ * Returns:  2 for xfrm_aevent_id 2.6.20+
+ *           1 for xfrm_aevent_id 2.6.17 to 2.6.19
+ *           0 for all other versions
+ *          -1 on errors
+ */
+int
+xfrm_aevent_version(void)
+{
+	struct utsname utsname;
+	int major, minor, micro;
+
+	if (uname(&utsname))
+		return -1;
+
+	if (sscanf(utsname.release, "%d.%d.%d", &major, &minor, &micro) != 3)
+		return -1;
+
+	if (major > 2 || (major == 2 && minor > 6) || (major == 2 && minor == 6 && micro >= 20))
+		return 2;
+	else if (major == 2 && minor == 6 && micro >= 17)
+		return 1;
+
+	return 0;
+}
 
 /* lock file support
  * - provides convenient way for scripts to find Pluto's pid
@@ -283,6 +318,8 @@ int main(int argc, char **argv)
 	}
 	options = options_create();
 
+	ha_mcast_addr.s_addr = inet_addr(SA_SYNC_MULTICAST);
+
 	/* handle arguments */
 	for (;;)
 	{
@@ -299,8 +336,14 @@ int main(int argc, char **argv)
 			{ "strictcrlpolicy", no_argument, NULL, 'r' },
 			{ "crlcheckinterval", required_argument, NULL, 'x'},
 			{ "cachecrls", no_argument, NULL, 'C' },
+			{ "probe-psk", no_argument, NULL, 'o' },
 			{ "uniqueids", no_argument, NULL, 'u' },
 			{ "interface", required_argument, NULL, 'i' },
+			{ "ha_interface", required_argument, NULL, 'H' },
+			{ "ha_multicast", required_argument, NULL, 'M' },
+			{ "ha_vips", required_argument, NULL, 'V' },
+			{ "ha_seqdiff_in", required_argument, NULL, 'S' },
+			{ "ha_seqdiff_out", required_argument, NULL, 'O' },
 			{ "ikeport", required_argument, NULL, 'p' },
 			{ "ctlbase", required_argument, NULL, 'b' },
 			{ "secretsfile", required_argument, NULL, 's' },
@@ -336,6 +379,7 @@ int main(int argc, char **argv)
 			{ "debug-dns", no_argument, NULL, DBG_DNS + DBG_OFFSET },
 			{ "debug-oppo", no_argument, NULL, DBG_OPPO + DBG_OFFSET },
 			{ "debug-controlmore", no_argument, NULL, DBG_CONTROLMORE + DBG_OFFSET },
+			{ "debug-ha", no_argument, NULL, DBG_HA + DBG_OFFSET },
 			{ "debug-private", no_argument, NULL, DBG_PRIVATE + DBG_OFFSET },
 
 			{ "impair-delay-adns-key-answer", no_argument, NULL, IMPAIR_DELAY_ADNS_KEY_ANSWER + DBG_OFFSET },
@@ -426,6 +470,10 @@ int main(int argc, char **argv)
 			cache_crls = TRUE;
 			continue;
 
+		case 'o':       /* --probe-psk */
+			probe_psk = TRUE;
+			continue;
+
 		case 'u':       /* --uniqueids */
 			uniqueIDs = TRUE;
 			continue;
@@ -433,6 +481,31 @@ int main(int argc, char **argv)
 		case 'i':       /* --interface <ifname> */
 			if (!use_interface(optarg))
 				usage("too many --interface specifications");
+			continue;
+
+		case 'H':       /* --ha_interface <ifname> */
+			if (optarg && strcmp(optarg, "none") != 0)
+				ha_interface = optarg;
+			continue;
+
+		case 'M':	/* --ha_multicast <ip> */
+			ha_mcast_addr.s_addr = inet_addr(optarg);
+			if (ha_mcast_addr.s_addr == INADDR_NONE ||
+				(((unsigned char *) &ha_mcast_addr.s_addr)[0] & 0xF0) != 0xE0)
+				ha_mcast_addr.s_addr = inet_addr(SA_SYNC_MULTICAST);
+			continue;
+
+		case 'V':	/* --ha_vips <ip addresses> */
+			if(add_ha_vips(optarg))
+				usage("misconfigured ha_vip addresses");
+			continue;
+
+		case 'S':	/* --ha_seqdiff_in <diff> */
+			ha_seqdiff_in = strtoul(optarg, NULL, 0);
+			continue;
+
+		case 'O':       /* --ha_seqdiff_out <diff> */
+			ha_seqdiff_out = strtoul(optarg, NULL, 0);
 			continue;
 
 		case 'p':       /* --port <portnumber> */
@@ -686,6 +759,72 @@ int main(int argc, char **argv)
 	ac_initialize();
 	whack_attribute_initialize();
 
+	/* HA System: set sequence number delta and open HA interface */
+	if (ha_interface != NULL)
+	{
+		int version;
+
+		if (kernel_ops->type == KERNEL_TYPE_LINUX
+		&& (version = xfrm_aevent_version()) != XFRM_AEVENT_VERSION)
+		{
+			if (version == 0)
+				plog("HA system: XFRM sequence number updates only "
+				     "supported with kernel version 2.6.17 and later.");
+			else if (version == -1)
+				plog("HA system: error reading kernel version. "
+				     "Sequence number updates disabled.");
+			else
+				plog("HA system: Strongswan compiled for wrong kernel "
+				     "AEVENT version! Please set XFRM_AEVENT_VERSION "
+				     "to %d in src/include/linux/xfrm.h", version);
+
+			ha_seqdiff_in = 0;
+			ha_seqdiff_out = 0;
+		}
+		else
+		{
+			FILE *etime = fopen("/proc/sys/net/core/xfrm_aevent_etime", "w");
+			FILE *rseqth = fopen("/proc/sys/net/core/xfrm_aevent_rseqth", "w");
+
+			if (etime == NULL || rseqth == NULL)
+			{
+				plog("HA System: no sequence number support in Kernel! "
+					"Please use at least kernel 2.6.17.");
+				ha_seqdiff_in = 0;
+				ha_seqdiff_out = 0;
+			}
+			else
+			{
+				/*
+				 * Disable etime (otherwise set to a multiple of 100ms,
+				 * e.g. 300 for 30 seconds). Using ha_seqdiff_out.
+				 */
+				fprintf(etime, "0");
+				fprintf(rseqth, "%d", ha_seqdiff_out);
+			}
+
+			fclose(etime);
+			fclose(rseqth);
+		}
+
+		if (open_ha_iface() >= 0)
+		{
+			plog("HA system enabled and listening on interface %s", ha_interface);
+			if (access("/var/master", F_OK) == 0)
+			{
+				plog("Initial HA switch to master mode");
+				ha_master = 1;
+				event_schedule(EVENT_SA_SYNC_UPDATE, 30, NULL);
+			}
+		}
+		else
+		{
+			plog("HA system failed to listen on interface %s. "
+			     "HA system disabled.", ha_interface);
+			ha_interface = NULL;
+		}
+	}
+
 	/* drop unneeded capabilities and change UID/GID */
 	prctl(PR_SET_KEEPCAPS, 1);
 
@@ -758,6 +897,7 @@ void exit_pluto(int status)
 	reset_globals();    /* needed because we may be called in odd state */
 	free_preshared_secrets();
 	free_remembered_public_keys();
+	close_ha_iface();
 	delete_every_connection();
 	whack_attribute_finalize(); /* free in-memory pools */
 	fetch_finalize();           /* stop fetching thread */

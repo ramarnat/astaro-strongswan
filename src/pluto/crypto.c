@@ -20,6 +20,18 @@
 #include "crypto.h"
 #include "log.h"
 
+static struct encrypt_desc encrypt_desc_des =
+{
+	algo_type:       IKE_ALG_ENCRYPT,
+	algo_id:         OAKLEY_DES_CBC,
+	algo_next:       NULL,
+
+	enc_blocksize:   DES_BLOCK_SIZE, 
+	keydeflen:       DES_BLOCK_SIZE * BITS_PER_BYTE,
+	keyminlen:       DES_BLOCK_SIZE * BITS_PER_BYTE,
+	keymaxlen:       DES_BLOCK_SIZE * BITS_PER_BYTE,
+};
+
 static struct encrypt_desc encrypt_desc_3des =
 {
 	algo_type:       IKE_ALG_ENCRYPT,
@@ -165,6 +177,13 @@ const struct dh_desc unset_group = {
 	algo_id:    MODP_NONE,
 	algo_next:  NULL,
 	ke_size:    0
+};
+
+static struct dh_desc dh_desc_modp_768 = {
+	algo_type:  IKE_ALG_DH_GROUP,
+	algo_id:    MODP_768_BIT,
+	algo_next:  NULL,
+	ke_size:    768 / BITS_PER_BYTE
 };
 
 static struct dh_desc dh_desc_modp_1024 = {
@@ -328,6 +347,9 @@ bool init_crypto(void)
 
 		switch (encryption_alg)
 		{
+			case ENCR_DES:
+				desc = &encrypt_desc_des;
+				break;
 			case ENCR_3DES:
 				desc = &encrypt_desc_3des;
 				break;
@@ -361,6 +383,9 @@ bool init_crypto(void)
 
 		switch (dh_group)
 		{
+			case MODP_768_BIT:
+				desc = &dh_desc_modp_768;
+				break;
 			case MODP_1024_BIT:
 				desc = &dh_desc_modp_1024;
 				break;
@@ -635,11 +660,12 @@ int esp_from_integrity_algorithm(integrity_algorithm_t alg)
 		case AUTH_AES_XCBC_96:
 			return AUTH_ALGORITHM_AES_XCBC_MAC;
 		case AUTH_HMAC_SHA2_256_96:
-			return AUTH_ALGORITHM_HMAC_SHA2_256_96;
 		case AUTH_HMAC_SHA2_256_128:
 			return AUTH_ALGORITHM_HMAC_SHA2_256;
+		case AUTH_HMAC_SHA2_384_96:
 		case AUTH_HMAC_SHA2_384_192:
 			return AUTH_ALGORITHM_HMAC_SHA2_384;
+		case AUTH_HMAC_SHA2_512_96:
 		case AUTH_HMAC_SHA2_512_256:
 			return AUTH_ALGORITHM_HMAC_SHA2_512;
 		case AUTH_AES_128_GMAC:

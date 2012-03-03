@@ -83,9 +83,10 @@ ENUM(timer_event_names, EVENT_NULL, EVENT_LOG_DAILY,
 	"EVENT_SA_REPLACE",
 	"EVENT_SA_REPLACE_IF_USED",
 	"EVENT_SA_EXPIRE",
+	"EVENT_SA_SYNC_UPDATE",
 	"EVENT_NAT_T_KEEPALIVE",
 	"EVENT_DPD",
-	"EVENT_DPD_TIMEOUT",
+	"EVENT_DPD_UPDATE",
 	"EVENT_LOG_DAILY"
 );
 
@@ -119,6 +120,9 @@ const char *const debug_bit_names[] = {
 	"controlmore",
 
 	"private",
+	"res12",
+	"res13",
+	"ha",
 
 	"impair-delay-adns-key-answer",
 	"impair-delay-adns-txt-answer",
@@ -132,6 +136,8 @@ const char *const debug_bit_names[] = {
 /* State of exchanges */
 
 static const char *const state_name[] = {
+	"STATE_UNDEFINED",
+
 	"STATE_MAIN_R0",
 	"STATE_MAIN_I1",
 	"STATE_MAIN_R1",
@@ -171,11 +177,12 @@ static const char *const state_name[] = {
 };
 
 enum_names state_names =
-	{ STATE_MAIN_R0, STATE_IKE_ROOF-1, state_name, NULL };
+	{ STATE_UNDEFINED, STATE_IKE_ROOF-1, state_name, NULL };
 
 /* story for state */
 
 const char *const state_story[] = {
+	"undefined state after error",			 /* STATE_UNDEFINED */
 	"expecting MI1",                         /* STATE_MAIN_R0 */
 	"sent MI1, expecting MR1",               /* STATE_MAIN_I1 */
 	"sent MR1, expecting MI2",               /* STATE_MAIN_R1 */
@@ -187,7 +194,7 @@ const char *const state_story[] = {
 
 	"expecting QI1",                         /* STATE_QUICK_R0 */
 	"sent QI1, expecting QR1",               /* STATE_QUICK_I1 */
-	"sent QR1, inbound IPsec SA installed, expecting QI2",  /* STATE_QUICK_R1 */
+	"sent QR1, expecting QI2",               /* STATE_QUICK_R1 */
 	"sent QI2, IPsec SA established",        /* STATE_QUICK_I2 */
 	"IPsec SA established",                  /* STATE_QUICK_R2 */
 
@@ -358,15 +365,8 @@ static const char *const ah_transform_name[] = {
 	"AES_256_GMAC"
 };
 
-static const char *const ah_transform_name_high[] = {
-	"HMAC_SHA2_256_96"
-};
-
-enum_names ah_transform_names_high =
-	{ AH_SHA2_256_96, AH_SHA2_256_96, ah_transform_name_high, NULL };
-
 enum_names ah_transform_names =
-	{ AH_MD5, AH_AES_256_GMAC, ah_transform_name, &ah_transform_names_high };
+	{ AH_MD5, AH_AES_256_GMAC, ah_transform_name, NULL };
 
 /* IPsec ESP transform values */
 
@@ -676,12 +676,11 @@ static const char *const auth_alg_name[] = {
 };
 
 static const char *const extended_auth_alg_name[] = {
-	"NULL",
-	"HMAC_SHA2_256_96"
+	"NULL"
 };
 
 enum_names extended_auth_alg_names =
-	{ AUTH_ALGORITHM_NULL, AUTH_ALGORITHM_HMAC_SHA2_256_96,
+	{ AUTH_ALGORITHM_NULL, AUTH_ALGORITHM_NULL,
 		extended_auth_alg_name, NULL };
 
 enum_names auth_alg_names =

@@ -61,6 +61,8 @@
 #include <pfkey.h>
 #include "kameipsec.h"
 #include "nat_traversal.h"
+#include "sa_sync.h"
+#include <limits.h>
 
 /*
  *  Server main loop and socket initialization routines.
@@ -75,6 +77,17 @@ struct sockaddr_un ctl_addr = { AF_UNIX, DEFAULT_CTLBASE CTL_SUFFIX };
 /* info (showpolicy) socket */
 int policy_fd = NULL_FD;
 struct sockaddr_un info_addr= { AF_UNIX, DEFAULT_CTLBASE INFO_SUFFIX };
+
+/* HA System: Variables and functions for HA mode*/
+char *ha_interface = NULL; /* NULL means HA System disabled, otherwise its a string with the interface name */
+struct in_addr ha_mcast_addr = { INADDR_ANY };
+int ha_master = -1; /* 1 TRUE is master, 0 FALSE is slave, -1 is init mode */
+u_int32_t ha_seqdiff_in = SA_SYNC_SEQDIFF_IN;
+u_int32_t ha_seqdiff_out = SA_SYNC_SEQDIFF_OUT;
+
+int ha_sock = NULL_FD; /* file descriptor of ha interface socket for multicast packets */
+int open_ha_iface(void);
+void close_ha_iface(void);
 
 /* Initialize the control socket.
  * Note: this is called very early, so little infrastructure is available.
@@ -125,6 +138,7 @@ delete_ctl_socket(void)
 bool listening = FALSE; /* should we pay attention to IKE messages? */
 
 struct iface *interfaces = NULL;        /* public interfaces */
+struct raw_iface *ha_vip_ifaces = NULL; /* HA VIP Addresses */
 
 /* Initialize the interface sockets. */
 
@@ -288,6 +302,18 @@ find_raw_ifaces4(void)
 				continue;       /* not found -- skip */
 		}
 
+		/* ignore if ha_vip interface names were specified, and this isn't one */
+		if (ha_vip_ifaces != NULL)
+		{
+			struct raw_iface *ri_vip;
+
+			for (ri_vip = ha_vip_ifaces; ri_vip != NULL; ri_vip = ri_vip->next)
+				if (streq(ri_vip->name, ri.name))
+					break;
+			if (ri_vip != NULL && streq(ri_vip->name, ri.name))
+				continue; /* Skip the ha vip interface */
+		}
+
 		/* Find out stuff about this interface.  See netdevice(7). */
 		zero(&auxinfo); /* paranoia */
 		memcpy(auxinfo.ifr_name, buf[j].ifr_name, IFNAMSIZ);
@@ -312,6 +338,20 @@ find_raw_ifaces4(void)
 	}
 
 	close(master_sock);
+
+	/* Add our HA VIP interfaces */
+	if(ha_vip_ifaces != NULL)
+	{
+		struct raw_iface ri_vip;
+		struct raw_iface *ri_ptr;
+
+		for (ri_ptr = ha_vip_ifaces; ri_ptr != NULL; ri_ptr = ri_ptr->next)
+		{
+			memcpy(&ri_vip, ri_ptr, sizeof(struct raw_iface));
+			ri_vip.next = rifaces;
+			rifaces = clone_thing(ri_vip);
+		}
+	}
 
 	return rifaces;
 }
@@ -650,7 +690,19 @@ add_entry:
 				if (q == NULL)
 				{
 					/* matches nothing -- create a new entry */
-					int fd = create_socket(ifp, v->name, pluto_port);
+					int fd = -1;
+
+					if (ha_vip_ifaces != NULL)
+					{
+						struct raw_iface *ri_ptr;
+
+						for (ri_ptr = ha_vip_ifaces; ri_ptr != NULL; ri_ptr = ri_ptr->next)
+							if (streq(ri_ptr->name, ifp->name))
+								fd = INT_MAX; /* Lets hope this fd isnt used otherwise ;) */
+					}
+
+					if (fd < 0)
+						fd = create_socket(ifp, v->name, pluto_port);
 
 					if (fd < 0)
 						break;
@@ -676,7 +728,20 @@ add_entry:
 					if (nat_traversal_support_port_floating
 					&& addrtypeof(&ifp->addr) == AF_INET)
 					{
-						fd = create_socket(ifp, v->name, NAT_T_IKE_FLOAT_PORT);
+						fd = -1;
+
+						if (ha_vip_ifaces != NULL)
+						{
+							struct raw_iface *ri_ptr;
+
+							for (ri_ptr = ha_vip_ifaces; ri_ptr != NULL; ri_ptr = ri_ptr->next)
+								if (streq(ri_ptr->name, ifp->name))
+									fd = INT_MAX; /* Lets hope this fd isnt used otherwise ;) */
+						}
+
+						if (fd < 0)
+							fd = create_socket(ifp, v->name, NAT_T_IKE_FLOAT_PORT);
+
 						if (fd < 0)
 							break;
 						nat_traversal_espinudp_socket(fd,
@@ -752,6 +817,13 @@ void
 show_ifaces_status(void)
 {
 	struct iface *p;
+
+	/* Display HA Informations if enabled */
+	if (ha_interface != NULL) {
+		whack_log(RC_COMMENT, "HA System active on %s/%s. Current mode is %s. Seqdiff in: %u Seqdiff out: %u",
+			ha_interface, inet_ntoa(ha_mcast_addr), ha_master == 1 ? "Master" : (ha_master == 0 ? "Slave" : "Init"), ha_seqdiff_in, ha_seqdiff_out);
+		whack_log(RC_COMMENT, BLANK_FORMAT);  /* spacer */
+	}
 
 	for (p = interfaces; p != NULL; p = p->next)
 		whack_log(RC_COMMENT, "interface %s/%s %s:%d"
@@ -837,6 +909,12 @@ call_server(void)
 			FD_ZERO(&readfds);
 			FD_ZERO(&writefds);
 			FD_SET(ctl_fd, &readfds);
+
+			if (ha_interface != NULL) {
+				if (maxfd < ha_sock)
+					maxfd = ha_sock;
+				FD_SET(ha_sock, &readfds);
+			}
 
 			/* the only write file-descriptor of interest */
 			if (adns_qfd != NULL_FD && unsent_ADNS_queries)
@@ -959,19 +1037,21 @@ call_server(void)
 				ndes--;
 			}
 #endif
-
-			for (ifp = interfaces; ifp != NULL; ifp = ifp->next)
+			if (listening)
 			{
-				if (FD_ISSET(ifp->fd, &readfds))
+				for (ifp = interfaces; ifp != NULL; ifp = ifp->next)
 				{
-					/* comm_handle will print DBG_CONTROL intro,
-					 * with more info than we have here.
-					 */
+					if (FD_ISSET(ifp->fd, &readfds))
+					{
+						/* comm_handle will print DBG_CONTROL intro,
+						 * with more info than we have here.
+						 */
 
-					passert(ndes > 0);
-					comm_handle(ifp);
-					passert(GLOBALS_ARE_RESET());
-					ndes--;
+						passert(ndes > 0);
+						comm_handle(ifp);
+						passert(GLOBALS_ARE_RESET());
+						ndes--;
+					}
 				}
 			}
 
@@ -986,7 +1066,229 @@ call_server(void)
 				ndes--;
 			}
 
+			/* Look for new ha multicast messages if HA System is enabled */
+			if (ha_interface != NULL && FD_ISSET(ha_sock, &readfds))
+			{
+				struct ha_sync_hdr sync_hdr;
+				struct ha_sync_msg *sync_msg;
+				struct sockaddr_in saddr;
+				socklen_t socklen = sizeof(saddr);
+				int msg_length;
+				ssize_t status;
+
+				passert(ndes > 0);
+
+				/* Take a look at the header to get the message size */
+				if (recvfrom(ha_sock, &sync_hdr, sizeof(sync_hdr), MSG_PEEK,
+					(struct sockaddr *) &saddr, &socklen) != sizeof(sync_hdr))
+				{
+					plog("HA System: Failed to peek at message header.");
+					goto ha_out;
+				}
+
+				if (sync_hdr.magic != SA_SYNC_MAGIC)
+				{
+					plog("HA System: Master and Slave seems to run different versions, HA message ignored!");
+					plog("\t Please upgrade to ensure a working HA system.");
+					recv(ha_sock, &sync_hdr, sizeof(sync_hdr), 0);
+					goto ha_out;
+				}
+
+				msg_length = sync_hdr.length + sizeof(sync_hdr);
+				sync_msg = malloc(msg_length);
+				if (sync_msg == NULL)
+				{
+					plog("HA System: Failed to allocate memory for sync message.");
+					goto ha_out;
+				}
+
+				do
+				{
+					status = recvfrom(ha_sock, sync_msg, msg_length, MSG_WAITALL,
+									  (struct sockaddr *) &saddr, &socklen);
+				} while (status == -1 && errno == EINTR);
+
+				if (status != msg_length)
+				{
+					plog("HA System: Failed to receive HA multicast message.");
+					goto ha_out_free;
+				}
+
+				DBG(DBG_HA, DBG_log("HA System: received %N message (%d bytes) from %s",
+					sync_msg_names, sync_hdr.type, msg_length, inet_ntoa(saddr.sin_addr)));
+				process_sync_msg(sync_msg, saddr.sin_addr);
+ha_out_free:
+				free(sync_msg);
+ha_out:
+				passert(GLOBALS_ARE_RESET());
+				ndes--;
+			}
+
 			passert(ndes == 0);
+		}
+	}
+}
+
+int
+open_ha_iface(void)
+{
+	int status;
+	int fd;
+	struct sockaddr_in saddr;
+	struct sockaddr_in *ha_saddr;
+	struct ifreq ha_ifreq;
+	struct ip_mreq imreq;
+	u_char sock_options;
+
+	/* set content of struct saddr, ha_saddr and imreq to zero */
+	memset(&saddr, 0, sizeof(struct sockaddr_in));
+	memset(&imreq, 0, sizeof(struct ip_mreq));
+
+	/* get ip address of ha interface and save to ha_ifreq*/
+	strcpy(ha_ifreq.ifr_name, ha_interface);
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	status = ioctl(fd, SIOCGIFADDR, &ha_ifreq);
+	if (status < 0)
+		return -1;
+
+	/* open a UDP socket */
+	ha_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+	if (ha_sock < 0)
+		return -1;
+
+	saddr.sin_family = AF_INET;
+	saddr.sin_port = htons(SA_SYNC_PORT);
+	saddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	status = bind(ha_sock, (struct sockaddr *) &saddr, sizeof(struct sockaddr_in));
+
+	if (status < 0)
+		return -1;
+
+	/* Bind UDP socket to ha interface */
+	status = setsockopt(ha_sock, SOL_SOCKET, SO_BINDTODEVICE, &ha_ifreq, sizeof(struct ifreq) );
+
+	if (status < 0)
+		return -1;
+
+	/* Bypass routing */
+	sock_options = 1;
+	setsockopt(ha_sock, SOL_SOCKET, SO_DONTROUTE, &sock_options, sizeof(sock_options));
+
+	/* Disable loop */
+	sock_options = 0;
+	setsockopt(ha_sock, IPPROTO_IP, IP_MULTICAST_LOOP, &sock_options, sizeof(sock_options));
+
+	/* Join multicast group */
+	ha_saddr = (struct sockaddr_in *) &ha_ifreq.ifr_addr; /* Needed to convert between different types */
+
+	imreq.imr_multiaddr = ha_mcast_addr;
+	imreq.imr_interface = ha_saddr->sin_addr;
+	status = setsockopt(ha_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const void *) &imreq, sizeof(struct ip_mreq));
+
+	if (status < 0)
+		return -1;
+
+	return TRUE;
+}
+
+void
+close_ha_iface(void)
+{
+	/* shutdown socket */
+	shutdown(ha_sock, 2);
+	/* close socket */
+	close(ha_sock);
+}
+
+int
+add_ha_vips(char *optarg)
+{
+	ip_address dst;
+	char *ptr, *ptr2;
+	struct raw_iface ri;
+	int len = 0;
+
+	do
+	{
+		ptr = strchr(optarg, ',');
+
+		if (ptr == NULL)
+			len = strlen(optarg);
+		else
+			len = ptr - optarg;
+
+		ptr2 = strchr(optarg, '=');
+
+		if (ptr2 == NULL || ptr2 - optarg > len)
+			return 1;
+
+		if (ttoaddr(ptr2 + 1, len - (ptr2 - optarg) - 1, AF_INET, &dst) == NULL)
+		{
+			ri.addr = dst;
+			*ptr2 = 0;
+			sprintf(&ri.name[0], "%s", optarg);
+			ri.next = ha_vip_ifaces;
+			ha_vip_ifaces = clone_thing(ri);
+		}
+		else
+			return 1;
+
+		if (ptr == NULL)
+			len = 0;
+		else
+			optarg = ptr + 1;
+	} while (len > 0);
+
+	return 0;
+}
+
+int
+listen_ha_vips()
+{
+	struct iface *p;
+	struct raw_iface *ri_ptr;
+
+	if (ha_vip_ifaces == NULL)
+		return 0;
+
+	for (ri_ptr = ha_vip_ifaces; ri_ptr != NULL; ri_ptr = ri_ptr->next)
+	{
+		for (p = interfaces; p != NULL; p = p->next)
+		{
+			if (streq(ri_ptr->name, p->rname))
+			{
+				if (p->ike_float)
+					p->fd = create_socket(ri_ptr, p->vname, NAT_T_IKE_FLOAT_PORT);
+				else
+					p->fd = create_socket(ri_ptr, p->vname, pluto_port);
+				if (p->fd < 0)
+					return 1;
+			}
+		}
+	}
+
+	return 0;
+}
+
+void
+unlisten_ha_vips()
+{
+	struct iface *p;
+	struct raw_iface *ri_ptr;
+
+	if (ha_vip_ifaces == NULL)
+		return;
+
+	for (ri_ptr = ha_vip_ifaces; ri_ptr != NULL; ri_ptr = ri_ptr->next)
+	{
+		for (p = interfaces; p != NULL; p = p->next)
+		{
+			if (streq(ri_ptr->name, p->rname))
+			{
+				close(p->fd);
+				p->fd = INT_MAX;
+			}
 		}
 	}
 }

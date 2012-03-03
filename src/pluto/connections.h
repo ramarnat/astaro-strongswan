@@ -23,9 +23,12 @@
 #include <utils/identification.h>
 #include <credentials/ietf_attributes/ietf_attributes.h>
 
+typedef struct connection connection_t;
+
 #include "certs.h"
 #include "smartcard.h"
 #include "whack.h"
+#include "keys.h"
 
 /* There are two kinds of connections:
  * - ISAKMP connections, between hosts (for IKE communication)
@@ -167,10 +170,9 @@ struct spd_route {
 	struct end that;
 	so_serial_t eroute_owner;
 	enum routing_t routing;     /* level of routing in place */
+	int dev;
 	uint32_t reqid;
 };
-
-typedef struct connection connection_t;
 
 struct connection {
 	char *name;
@@ -204,6 +206,7 @@ struct connection {
 	bool instance_initiation_ok;        /* this is an instance of a policy that mandates initiate */
 	enum connection_kind kind;
 	const struct iface *interface;      /* filled in iff oriented */
+	psk_list_t psk_list;                /* auth key list for templates/instances */
 
 	so_serial_t /* state object serial number */
 		newest_isakmp_sa,
@@ -230,6 +233,9 @@ struct connection {
 	linked_list_t *requested;           /* requested attributes with handlers */
 	linked_list_t *attributes;          /* configuration attributes with handlers */
 	bool got_certrequest;
+	u_int16_t l2tp_orig_port;           /* peer's original L2TP port, for magic */
+	int dev;			    /* bind to interface */
+	u_int8_t xfrm_flags;                /* flags for netkey IPsec SAs */
 };
 
 #define oriented(c) ((c).interface != NULL)
@@ -248,14 +254,17 @@ extern size_t format_end(char *buf, size_t buf_len, const struct end *this,
 
 extern void add_connection(const whack_message_t *wm);
 extern void initiate_connection(const char *name, int whackfd);
+extern void reinit_connections(void);
 extern void initiate_opportunistic(const ip_address *our_client,
 								   const ip_address *peer_client,
 								   int transport_proto, bool held, int whackfd);
 extern void terminate_connection(const char *nm);
+extern void reinitiate_all_by_peer(ip_address* addr);
 extern void release_connection(connection_t *c, bool relations);
 extern void delete_connection(connection_t *c, bool relations);
 extern void delete_connections_by_name(const char *name, bool strict);
 extern void delete_every_connection(void);
+extern void delete_every_conn_psk_list(void);
 extern char *add_group_instance(connection_t *group, const ip_subnet *target);
 extern void remove_group_instance(const connection_t *group, const char *name);
 extern void release_dead_interfaces(void);
@@ -273,7 +282,12 @@ extern bool his_id_was_instantiated(const connection_t *c);
 
 struct state;   /* forward declaration of tag (defined in state.h) */
 
+typedef void (*con_states_fn)(struct state *, void *);
+extern uint32_t states_by_con_name(const char *, con_states_fn, void *);
+
 extern connection_t* con_by_name(const char *nm, bool strict);
+extern connection_t* con_by_name_and_iserial(const char *nm,
+											 unsigned long iserial);
 extern connection_t* find_host_connection(const ip_address *me,
 										  u_int16_t my_port,
 										  const ip_address *him,
@@ -287,7 +301,8 @@ extern connection_t* find_client_connection(connection_t *c,
 											const u_int8_t our_protocol,
 											const u_int16_t out_port,
 											const u_int8_t peer_protocol,
-											const u_int16_t peer_port);
+											const u_int16_t peer_port,
+											const bool peer_behind_nat_gateway);
 extern connection_t* find_connection_by_reqid(uint32_t reqid);
 extern connection_t* find_connection_for_clients(struct spd_route **srp,
 												 const ip_address *our_client,
@@ -357,6 +372,7 @@ extern connection_t *eclipsed(connection_t *c, struct spd_route **);
 extern void show_connections_status(bool all, const char *name);
 extern int  connection_compare(const connection_t *ca
 	, const connection_t *cb);
+extern int number_of_connections(struct spd_route *sr);
 extern void update_host_pair(const char *why, connection_t *c
 	, const ip_address *myaddr, u_int16_t myport
 	, const ip_address *hisaddr, u_int16_t hisport);

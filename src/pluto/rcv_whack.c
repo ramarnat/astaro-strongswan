@@ -58,6 +58,7 @@
 #include "kernel_alg.h"
 #include "ike_alg.h"
 #include "whack_attribute.h"
+#include "timer.h"
 
 /* helper variables and function to decode strings from whack message */
 
@@ -79,6 +80,8 @@ static bool unpack_str(char **p)
 		return TRUE;
 	}
 }
+
+#include "sa_sync.h"
 
 /* bits loading keys from asynchronous DNS */
 
@@ -384,6 +387,93 @@ void whack_handle(int whackctlfd)
 		set_myid(MYID_SPECIFIED, msg.myid);
 	}
 
+	if (msg.whack_ha_mode)
+	{
+		if (ha_interface)
+		{
+			if (msg.ha_master == 0)
+			{
+				if (ha_master == 0)
+				{
+					plog("HA System: pluto already is in slave mode");
+				}
+				else
+				{
+					plog("Pluto is now in slave mode");
+					ha_master = 0;
+					/* Time to do some dirty things */
+					listening = FALSE;
+					remove_dpd_events();
+					/* Make sure that even after immediate
+					 * re-takover there will be no packet lost
+					 */
+					state_increase_oseq();
+					unlisten_ha_vips();
+					/* Time to get SAs from master */
+					do_sync_request_bulk();
+				}
+			}
+			else if (msg.ha_master == 1)
+			{
+				if (ha_master == 1)
+				{
+					plog("HA System: pluto already is in master mode");
+				}
+				else if (listen_ha_vips() == 1)
+				{
+					plog("HA System: failed to listen on ha_vips interfaces. Please check your configuration.");
+					plog("HA System: unable to switch master mode");
+				}
+				else
+				{
+					plog("Pluto is now in master mode");
+					ha_master = 1;
+					/* Time to remove the dirty things */
+					listening = TRUE;
+					insert_dpd_events();
+					reinit_connections();
+					event_schedule(EVENT_SA_SYNC_UPDATE, 30, NULL);
+				}
+			}
+			else if (msg.ha_master == -1)
+			{
+				if (ha_master == -1)
+				{
+					plog("HA System: pluto already is in init mode");
+				}
+				else
+				{
+					plog("Pluto is in HA init mode");
+					ha_master = -1;
+					/* Time to do some dirty things */
+					listening = FALSE;
+					remove_dpd_events();
+					unlisten_ha_vips();
+				}
+			}
+			else if (msg.ha_master == -2)
+			{
+				if (HA_SLAVE)
+				{
+					do_sync_request_bulk();
+				}
+				else
+				{
+					plog("HA System: unable to resync SAs, pluto is not in slave mode.");
+				}
+			}
+			else if (msg.ha_master == -3)
+			{
+				plog("HA System: increasing outgoing ipsec sequence numbers for all IPsec SAs");
+				state_increase_oseq();
+			}
+		}
+		else
+		{
+			plog("HA System not activated. See docs/README.HA for more information.");
+		}
+	}
+
 	/* Deleting combined with adding a connection works as replace.
 	 * To make this more useful, in only this combination,
 	 * delete will silently ignore the lack of the connection.
@@ -434,8 +524,16 @@ void whack_handle(int whackctlfd)
 	if (msg.whack_listen)
 	{
 		close_peerlog();    /* close any open per-peer logs */
-		plog("listening for IKE messages");
-		listening = TRUE;
+		if (HA_NOT_MASTER)
+		{
+			plog("HA System: not master, won't listen for IKE messages");
+			listening = FALSE;
+		}
+		else
+		{
+			plog("listening for IKE messages");
+			listening = TRUE;
+		}
 		daily_log_reset();
 		reset_adns_restart_count();
 		set_myFQDN();
@@ -443,7 +541,7 @@ void whack_handle(int whackctlfd)
 		load_preshared_secrets(NULL_FD);
 		load_groups();
 	}
-	if (msg.whack_unlisten)
+	if (msg.whack_unlisten && listening == TRUE)
 	{
 		plog("no longer listening for IKE messages");
 		listening = FALSE;

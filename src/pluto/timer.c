@@ -40,6 +40,7 @@
 #include "timer.h"
 #include "whack.h"
 #include "nat_traversal.h"
+#include "sa_sync.h"
 
 /**
  * monotonic version of time(3)
@@ -85,7 +86,7 @@ void event_schedule(enum event_type type, time_t tm, struct state *st)
 	 */
 	if (st != NULL)
 	{
-		if (type == EVENT_DPD || type == EVENT_DPD_TIMEOUT)
+		if (type == EVENT_DPD || type == EVENT_DPD_UPDATE)
 		{
 			passert(st->st_dpd_event == NULL);
 			st->st_dpd_event = ev;
@@ -211,7 +212,7 @@ void handle_timer_event(void)
 	if (st != NULL)
 	{
 		c = st->st_connection;
-		if (type  == EVENT_DPD || type == EVENT_DPD_TIMEOUT)
+		if (type == EVENT_DPD || type == EVENT_DPD_UPDATE)
 		{
 			passert(st->st_dpd_event == ev);
 			st->st_dpd_event = NULL;
@@ -349,6 +350,14 @@ void handle_timer_event(void)
 			}
 			break;
 
+		case EVENT_SA_SYNC_UPDATE:
+			if (ha_master == 1)
+			{
+				do_sync_states_update(ha_mcast_addr);
+				event_schedule(EVENT_SA_SYNC_UPDATE, 15, NULL);
+			}
+			break;
+
 		case EVENT_SA_REPLACE:
 		case EVENT_SA_REPLACE_IF_USED:
 			{
@@ -442,8 +451,8 @@ void handle_timer_event(void)
 		case EVENT_DPD:
 			dpd_outI(st);
 			break;
-		case EVENT_DPD_TIMEOUT:
-			dpd_timeout(st);
+		case EVENT_DPD_UPDATE:
+			dpd_update(st);
 			break;
 		case EVENT_NAT_T_KEEPALIVE:
 			nat_traversal_ka_event();

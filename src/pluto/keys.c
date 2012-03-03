@@ -53,6 +53,7 @@
 #include "whack.h"      /* for RC_LOG_SERIOUS */
 #include "timer.h"
 #include "fetch.h"
+#include "demux.h"
 
 const char *shared_secrets_file = SHARED_SECRETS_FILE;
 
@@ -65,8 +66,6 @@ enum secret_kind_t {
 	SECRET_XAUTH,
 	SECRET_PIN
 };
-
-typedef struct secret_t secret_t;
 
 struct secret_t {
 	linked_list_t *ids;
@@ -93,10 +92,32 @@ static void free_public_key(pubkey_t *pk)
 
 secret_t *secrets = NULL;
 
+psk_list_t empty_psk_list = { NULL, NULL };
+
+/* Free PSK list of a connection template. */
+void free_psk_list(enum connection_kind kind, psk_list_t *psk_list)
+{
+	if (kind == CK_TEMPLATE)
+	{
+		while (psk_list->start)
+		{
+			secret_t *next = psk_list->start->next;
+			free(psk_list->start);
+			psk_list->start = next;
+		}
+	}
+	else
+	{
+		psk_list->start = NULL;
+	}
+	psk_list->pos = NULL;
+}
+
 /**
  * Find the secret associated with the combination of me and the peer.
  */
-const secret_t* match_secret(identification_t *my_id, identification_t *his_id,
+const secret_t* match_secret(connection_t *c,
+							 identification_t *my_id, identification_t *his_id,
 							 secret_kind_t kind)
 {
 	enum {      /* bits */
@@ -177,6 +198,15 @@ const secret_t* match_secret(identification_t *my_id, identification_t *his_id,
 					switch (kind)
 					{
 					case SECRET_PSK:
+						/* PSK probing: for instantiated connections each
+						 * equally matching secret will be tried during
+						 * reception of main mode message three from
+						 * the initiator in demux.c, thus skipping test for
+						 * equality here.
+						 */
+						same = probe_psk && c->kind == CK_TEMPLATE ? TRUE :
+							chunk_equals(s->u.preshared_secret, best->u.preshared_secret);
+						break;
 					case SECRET_XAUTH:
 						same = chunk_equals(s->u.preshared_secret,
 											best->u.preshared_secret);
@@ -200,6 +230,20 @@ const secret_t* match_secret(identification_t *my_id, identification_t *his_id,
 					/* this is the best match so far */
 					best_match = match;
 					best = s;
+
+					/* Clear the connection's PSK list */
+					if (probe_psk && kind == SECRET_PSK && c->kind == CK_TEMPLATE)
+					{
+						free_psk_list(c->kind, &c->psk_list);
+					}
+				}
+				/* Add PSK to the connection's list */
+				if (probe_psk && kind == SECRET_PSK && c->kind == CK_TEMPLATE)
+				{
+					best = clone_thing(*s);
+					best->next = c->psk_list.start;
+					c->psk_list.start = best;
+					c->psk_list.pos = c->psk_list.start;
 				}
 		}
 	}
@@ -210,12 +254,12 @@ const secret_t* match_secret(identification_t *my_id, identification_t *his_id,
  * Retrieves an XAUTH secret primarily based on the user ID and
  * secondarily based on the server ID
  */
-bool get_xauth_secret(identification_t *user, identification_t *server,
-					  chunk_t *secret)
+bool get_xauth_secret(connection_t *c, identification_t *user,
+					  identification_t *server, chunk_t *secret)
 {
 	const secret_t *s;
 
-	s = match_secret(user, server, SECRET_XAUTH);
+	s = match_secret(c, user, server, SECRET_XAUTH);
 	if (s)
 	{
 		*secret = chunk_clone(s->u.preshared_secret);
@@ -256,7 +300,7 @@ static const secret_t* get_secret(const connection_t *c, secret_kind_t kind)
 		his_id = c->spd.that.id->clone(c->spd.that.id);
 	}
 
-	best = match_secret(my_id, his_id, kind);
+	best = match_secret(c, my_id, his_id, kind);
 
 	his_id->destroy(his_id);
 	return best;
@@ -266,9 +310,29 @@ static const secret_t* get_secret(const connection_t *c, secret_kind_t kind)
  * Failure is indicated by a NULL pointer.
  * Note: the result is not to be freed by the caller.
  */
-const chunk_t* get_preshared_secret(const connection_t *c)
+const chunk_t* get_preshared_secret(connection_t *c)
 {
-	const secret_t *s = get_secret(c, SECRET_PSK);
+	const secret_t *s;
+	connection_t *base = con_by_name(c->name, 1);
+
+	/* If the connection instance has a PSK list, use the first PSK */
+	if (c->kind == CK_INSTANCE && c->psk_list.start)
+	{
+		c->psk_list.pos = c->psk_list.start;
+		s = c->psk_list.pos;
+	}
+	/* If the connection template has a PSK list, use the first PSK */
+	else if (base && base->psk_list.start)
+	{
+		passert(base->psk_list.start->kind == SECRET_PSK);
+		c->psk_list.start = base->psk_list.start;
+		c->psk_list.pos = c->psk_list.start;
+		s = c->psk_list.pos;
+	}
+	else
+	{
+		s = get_secret((base ? base : c), SECRET_PSK);
+	}
 
 	DBG(DBG_PRIVATE,
 		if (s == NULL)
@@ -277,6 +341,25 @@ const chunk_t* get_preshared_secret(const connection_t *c)
 			DBG_dump_chunk("Preshared Key", s->u.preshared_secret);
 	)
 	return s == NULL? NULL : &s->u.preshared_secret;
+}
+
+const chunk_t *next_preshared_secret(connection_t *c)
+{
+	const secret_t *s = NULL;
+
+	if (c->psk_list.pos)
+	{
+		c->psk_list.pos = c->psk_list.pos->next;
+		s = c->psk_list.pos;
+	}
+
+	DBG(DBG_PRIVATE,
+		if (s == NULL)
+			DBG_log("no more Preshared Keys Found");
+		else
+			DBG_dump_chunk("next Preshared Key", s->u.preshared_secret);
+	)
+	return s == NULL ? NULL : &s->u.preshared_secret;
 }
 
 /* check the existence of a private key matching a public key contained
@@ -958,6 +1041,7 @@ static void process_secrets_file(const char *file_pat, int whackfd)
 void free_preshared_secrets(void)
 {
 	lock_certs_and_keys("free_preshared_secrets");
+	delete_every_conn_psk_list();
 
 	if (secrets != NULL)
 	{

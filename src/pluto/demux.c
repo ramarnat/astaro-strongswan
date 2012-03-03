@@ -141,10 +141,14 @@
 #include "nat_traversal.h"
 #include "vendor.h"
 #include "modecfg.h"
+#include "sa_sync.h"
+#include "keys.h"
 
 /* This file does basic header checking and demux of
  * incoming packets.
  */
+
+bool probe_psk = FALSE; /* --probe-psk? */
 
 /* forward declarations */
 static bool read_packet(struct msg_digest *md);
@@ -1154,7 +1158,8 @@ read_packet(struct msg_digest *md)
 	cur_from = &md->sender;
 	cur_from_port = md->sender_port;
 
-	if (ifp->ike_float == TRUE)
+	/* HA System: Send no packets in slave mode */
+	if (ifp->ike_float == TRUE && (ha_interface == NULL || ha_master == 1))
 	{
 		u_int32_t non_esp;
 
@@ -1226,6 +1231,163 @@ read_packet(struct msg_digest *md)
 	return TRUE;
 }
 
+#define SEND_NOTIFICATION(t) { \
+	if (st) send_notification_from_state(st, from_state, t); \
+	else send_notification_from_md(md, t); }
+
+/* Digest the message.
+ * Padding must be removed to make hashing work.
+ * Padding comes from encryption (so this code must be after decryption).
+ * Padding rules are described before the definition of
+ * struct isakmp_hdr in packet.h.
+ */
+static int digest_message(struct msg_digest *md, struct state *st,
+						  enum state_kind from_state,
+						  const struct state_microcode *smc)
+{
+	struct payload_digest *pd = md->digest;
+	int np = md->hdr.isa_np;
+	lset_t needed = smc->req_payloads;
+	bool psk_auth_fail = LIN(SMF_PSK_AUTH | SMF_FIRST_ENCRYPTED_INPUT, smc->flags);
+
+	while (np != ISAKMP_NEXT_NONE)
+	{
+		struct_desc *sd = np < ISAKMP_NEXT_ROOF? payload_descs[np] : NULL;
+
+		if (pd == &md->digest[PAYLIMIT])
+		{
+			loglog(RC_LOG_SERIOUS, "more than %d payloads in message; ignored", PAYLIMIT);
+			SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
+			return ISAKMP_PAYLOAD_MALFORMED;
+		}
+
+		switch (np)
+		{
+			case ISAKMP_NEXT_NATD_RFC:
+			case ISAKMP_NEXT_NATOA_RFC:
+				if (!st || !(st->nat_traversal & NAT_T_WITH_RFC_VALUES))
+				{
+					/*
+					 * don't accept NAT-D/NAT-OA reloc directly in message, unless
+					 * we're using NAT-T RFC
+					 */
+					sd = NULL;
+				}
+				break;
+		}
+
+		if (sd == NULL)
+		{
+			/* payload type is out of range or requires special handling */
+			switch (np)
+			{
+			case ISAKMP_NEXT_ID:
+				sd = IS_PHASE1(from_state)
+					? &isakmp_identification_desc : &isakmp_ipsec_identification_desc;
+				break;
+			case ISAKMP_NEXT_NATD_DRAFTS:
+				np = ISAKMP_NEXT_NATD_RFC;  /* NAT-D relocated */
+				sd = payload_descs[np];
+				break;
+			case ISAKMP_NEXT_NATOA_DRAFTS:
+				np = ISAKMP_NEXT_NATOA_RFC;  /* NAT-OA relocated */
+				sd = payload_descs[np];
+				break;
+			default:
+				if (psk_auth_fail)
+				{
+					return -ISAKMP_INVALID_PAYLOAD_TYPE;
+				}
+				else
+				{
+					loglog(RC_LOG_SERIOUS, "message ignored because it contains an unknown or"
+						" unexpected payload type (%s) at the outermost level"
+						, enum_show(&payload_names, np));
+					SEND_NOTIFICATION(ISAKMP_INVALID_PAYLOAD_TYPE);
+					return ISAKMP_INVALID_PAYLOAD_TYPE;
+				}
+			}
+		}
+
+		{
+			lset_t s = LELEM(np);
+
+			if (LDISJOINT(s
+			, needed | smc->opt_payloads| LELEM(ISAKMP_NEXT_N) | LELEM(ISAKMP_NEXT_D)))
+			{
+				if (psk_auth_fail)
+				{
+					return -ISAKMP_INVALID_PAYLOAD_TYPE;
+				}
+				else
+				{
+					loglog(RC_LOG_SERIOUS, "message ignored because it "
+						"contains an unexpected payload type (%s)"
+						, enum_show(&payload_names, np));
+					SEND_NOTIFICATION(ISAKMP_INVALID_PAYLOAD_TYPE);
+					return ISAKMP_INVALID_PAYLOAD_TYPE;
+				}
+			}
+			needed &= ~s;
+		}
+
+		if (!in_struct(&pd->payload, sd, &md->message_pbs, &pd->pbs))
+		{
+			if (psk_auth_fail)
+			{
+				return -ISAKMP_PAYLOAD_MALFORMED;
+			}
+			else
+			{
+				loglog(RC_LOG_SERIOUS, "malformed payload in packet");
+				if (md->hdr.isa_xchg != ISAKMP_XCHG_INFO)
+					SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
+				return ISAKMP_PAYLOAD_MALFORMED;
+			}
+		}
+
+		/* place this payload at the end of the chain for this type */
+		{
+			struct payload_digest **p;
+
+			for (p = &md->chain[np]; *p != NULL; p = &(*p)->next)
+				;
+			*p = pd;
+			pd->next = NULL;
+		}
+
+		np = pd->payload.generic.isag_np;
+		pd++;
+
+		/* since we've digested one payload happily, it is probably
+		 * the case that any decryption worked.  So we will not suggest
+		 * encryption failure as an excuse for subsequent payload
+		 * problems.
+		 */
+		psk_auth_fail = FALSE;
+	}
+
+	md->digest_roof = pd;
+
+	DBG(DBG_PARSING,
+		if (pbs_left(&md->message_pbs) != 0)
+			DBG_log("removing %d bytes of padding", (int) pbs_left(&md->message_pbs)));
+
+	md->message_pbs.roof = md->message_pbs.cur;
+
+	/* check that all mandatory payloads appeared */
+	if (needed != 0)
+	{
+		loglog(RC_LOG_SERIOUS, "message for %s is missing payloads %s"
+			, enum_show(&state_names, from_state)
+			, bitnamesof(payload_name, needed));
+		SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
+		return ISAKMP_PAYLOAD_MALFORMED;
+	}
+
+	return 0;
+}
+
 /* process an input packet, possibly generating a reply.
  *
  * If all goes well, this routine eventually calls a state-specific
@@ -1243,10 +1405,6 @@ process_packet(struct msg_digest **mdp)
 
 	struct state *st = NULL;
 	enum state_kind from_state = STATE_UNDEFINED;       /* state we started in */
-
-#define SEND_NOTIFICATION(t) { \
-	if (st) send_notification_from_state(st, from_state, t); \
-	else send_notification_from_md(md, t); }
 
 	if (!in_struct(&md->hdr, &isakmp_hdr_desc, &md->packet_pbs, &md->message_pbs))
 	{
@@ -1807,36 +1965,78 @@ process_packet(struct msg_digest **mdp)
 
 			data = chunk_create(md->message_pbs.cur, pbs_left(&md->message_pbs));
 
-			/* Decrypt everything after header */
-			if (!new_iv_set)
+			while (TRUE)
 			{
-				/* use old IV */
-				passert(st->st_iv_len <= sizeof(st->st_new_iv));
-				st->st_new_iv_len = st->st_iv_len;
-				memcpy(st->st_new_iv, st->st_iv, st->st_new_iv_len);
-			}
+				int digest_error;
 
-			/* form iv by truncation */
-			st->st_new_iv_len = crypter_block_size;
-			iv = chunk_create(st->st_new_iv, st->st_new_iv_len);
-			new_iv = alloca(crypter_block_size);
-			memcpy(new_iv, data.ptr + data.len - crypter_block_size,
-				   crypter_block_size);
+				/* Decrypt everything after header */
+				if (!new_iv_set)
+				{
+					/* use old IV */
+					passert(st->st_iv_len <= sizeof(st->st_new_iv));
+					st->st_new_iv_len = st->st_iv_len;
+					memcpy(st->st_new_iv, st->st_iv, st->st_new_iv_len);
+				}
 
-			crypter->set_key(crypter, st->st_enc_key);
-			crypter->decrypt(crypter, data, iv, NULL);
-			crypter->destroy(crypter);
+				/* form iv by truncation */
+				st->st_new_iv_len = crypter_block_size;
+				iv = chunk_create(st->st_new_iv, st->st_new_iv_len);
+				new_iv = alloca(crypter_block_size);
+				memcpy(new_iv, data.ptr + data.len - crypter_block_size,
+					crypter_block_size);
 
-		memcpy(st->st_new_iv, new_iv, crypter_block_size);
-			if (restore_iv)
-			{
-				memcpy(st->st_new_iv, new_iv, new_iv_len);
-				st->st_new_iv_len = new_iv_len;
+				crypter->set_key(crypter, st->st_enc_key);
+				crypter->decrypt(crypter, data, iv, NULL);
+				crypter->destroy(crypter);
+
+				memcpy(st->st_new_iv, new_iv, crypter_block_size);
+				if (restore_iv)
+				{
+					memcpy(st->st_new_iv, new_iv, new_iv_len);
+					st->st_new_iv_len = new_iv_len;
+				}
+
+				DBG_cond_dump(DBG_CRYPT, "decrypted:\n", md->message_pbs.cur
+					, md->message_pbs.roof - md->message_pbs.cur);
+
+				/* Digest the message */
+				digest_error = digest_message(md, st, from_state, smc);
+				if (!digest_error)
+				{
+					break;
+				}
+				else if (digest_error > 0)
+				{
+					return;
+				}
+				else if (probe_psk && st->st_connection->kind == CK_INSTANCE
+				&&  LIN(SMF_PSK_AUTH | SMF_FIRST_ENCRYPTED_INPUT, smc->flags))
+				{
+					/* If enabled, try to find another potentially correct
+					 * preshared key for instantiated connections
+					 */
+					chunk_t *pss = next_preshared_secret(st->st_connection);
+					if (pss)
+					{
+						/* Generate SKEYID from preshared secret, SKEYID_* and
+						 * encryption key from SKEYID, restore undecrypted
+						 * data and crypter and give it another go
+						 */
+						generate_skeyid_preshared(st, pss);
+						generate_keys(st);
+						memcpy(md->packet_pbs.start, md->raw_packet.ptr, md->raw_packet.len);
+						data = chunk_create(md->message_pbs.cur, pbs_left(&md->message_pbs));
+						crypter = lib->crypto->create_crypter(lib->crypto, enc_alg, st->st_enc_key.len);
+						plog("Preshared secret failed to decrypt message. Trying next one.");
+						continue;
+					}
+				}
+				loglog(RC_LOG_SERIOUS, "malformed payload in packet. "
+					   "Probable authentication failure (mismatch of preshared secrets?)");
+				SEND_NOTIFICATION(-digest_error);
+				return;
 			}
 		}
-
-		DBG_cond_dump(DBG_CRYPT, "decrypted:\n", md->message_pbs.cur
-			, md->message_pbs.roof - md->message_pbs.cur);
 
 		DBG_cond_dump(DBG_CRYPT, "next IV:"
 			, st->st_new_iv, st->st_new_iv_len);
@@ -1844,142 +2044,14 @@ process_packet(struct msg_digest **mdp)
 	else
 	{
 		/* packet was not encryped -- should it have been? */
-
 		if (smc->flags & SMF_INPUT_ENCRYPTED)
 		{
 			loglog(RC_LOG_SERIOUS, "packet rejected: should have been encrypted");
 			SEND_NOTIFICATION(ISAKMP_INVALID_FLAGS);
 			return;
 		}
-	}
-
-	/* Digest the message.
-	 * Padding must be removed to make hashing work.
-	 * Padding comes from encryption (so this code must be after decryption).
-	 * Padding rules are described before the definition of
-	 * struct isakmp_hdr in packet.h.
-	 */
-	{
-		struct payload_digest *pd = md->digest;
-		int np = md->hdr.isa_np;
-		lset_t needed = smc->req_payloads;
-		const char *excuse
-			= LIN(SMF_PSK_AUTH | SMF_FIRST_ENCRYPTED_INPUT, smc->flags)
-				? "probable authentication failure (mismatch of preshared secrets?): "
-				: "";
-
-		while (np != ISAKMP_NEXT_NONE)
+		else if (digest_message(md, st, from_state, smc) != 0)
 		{
-			struct_desc *sd = np < ISAKMP_NEXT_ROOF? payload_descs[np] : NULL;
-
-			if (pd == &md->digest[PAYLIMIT])
-			{
-				loglog(RC_LOG_SERIOUS, "more than %d payloads in message; ignored", PAYLIMIT);
-				SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
-				return;
-			}
-
-			switch (np)
-			{
-				case ISAKMP_NEXT_NATD_RFC:
-				case ISAKMP_NEXT_NATOA_RFC:
-					if (!st || !(st->nat_traversal & NAT_T_WITH_RFC_VALUES))
-					{
-						/*
-						 * don't accept NAT-D/NAT-OA reloc directly in message, unless
-						 * we're using NAT-T RFC
-						 */
-						sd = NULL;
-					}
-					break;
-			}
-
-			if (sd == NULL)
-			{
-				/* payload type is out of range or requires special handling */
-				switch (np)
-				{
-				case ISAKMP_NEXT_ID:
-					sd = IS_PHASE1(from_state)
-						? &isakmp_identification_desc : &isakmp_ipsec_identification_desc;
-					break;
-				case ISAKMP_NEXT_NATD_DRAFTS:
-					np = ISAKMP_NEXT_NATD_RFC;  /* NAT-D relocated */
-					sd = payload_descs[np];
-					break;
-				case ISAKMP_NEXT_NATOA_DRAFTS:
-					np = ISAKMP_NEXT_NATOA_RFC;  /* NAT-OA relocated */
-					sd = payload_descs[np];
-					break;
-				default:
-					loglog(RC_LOG_SERIOUS, "%smessage ignored because it contains an unknown or"
-						" unexpected payload type (%s) at the outermost level"
-						, excuse, enum_show(&payload_names, np));
-					SEND_NOTIFICATION(ISAKMP_INVALID_PAYLOAD_TYPE);
-					return;
-				}
-			}
-
-			{
-				lset_t s = LELEM(np);
-
-				if (LDISJOINT(s
-				, needed | smc->opt_payloads| LELEM(ISAKMP_NEXT_N) | LELEM(ISAKMP_NEXT_D)))
-				{
-					loglog(RC_LOG_SERIOUS, "%smessage ignored because it "
-						   "contains an unexpected payload type (%s)"
-						, excuse, enum_show(&payload_names, np));
-					SEND_NOTIFICATION(ISAKMP_INVALID_PAYLOAD_TYPE);
-					return;
-				}
-				needed &= ~s;
-			}
-
-			if (!in_struct(&pd->payload, sd, &md->message_pbs, &pd->pbs))
-			{
-				loglog(RC_LOG_SERIOUS, "%smalformed payload in packet", excuse);
-				if (md->hdr.isa_xchg != ISAKMP_XCHG_INFO)
-					SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
-				return;
-			}
-
-			/* place this payload at the end of the chain for this type */
-			{
-				struct payload_digest **p;
-
-				for (p = &md->chain[np]; *p != NULL; p = &(*p)->next)
-					;
-				*p = pd;
-				pd->next = NULL;
-			}
-
-			np = pd->payload.generic.isag_np;
-			pd++;
-
-			/* since we've digested one payload happily, it is probably
-			 * the case that any decryption worked.  So we will not suggest
-			 * encryption failure as an excuse for subsequent payload
-			 * problems.
-			 */
-			excuse = "";
-		}
-
-		md->digest_roof = pd;
-
-		DBG(DBG_PARSING,
-			if (pbs_left(&md->message_pbs) != 0)
-				DBG_log("removing %d bytes of padding", (int) pbs_left(&md->message_pbs)));
-
-		md->message_pbs.roof = md->message_pbs.cur;
-
-		/* check that all mandatory payloads appeared */
-
-		if (needed != 0)
-		{
-			loglog(RC_LOG_SERIOUS, "message for %s is missing payloads %s"
-				, enum_show(&state_names, from_state)
-				, bitnamesof(payload_name, needed));
-			SEND_NOTIFICATION(ISAKMP_PAYLOAD_MALFORMED);
 			return;
 		}
 	}
@@ -2305,9 +2377,22 @@ complete_state_transition(struct msg_digest **mdp, stf_status result)
 				event_schedule(kind, delay, st);
 			}
 
+			/*
+			 * HA System: here is a good place to notify the other nodes
+			 *            of established ISAKMP and IPsec SAs
+			 */
+			if (ha_master == 1)
+			{
+				if (IS_ISAKMP_SA_ESTABLISHED(st->st_state) ||
+					IS_IPSEC_SA_ESTABLISHED(st->st_state))
+				{
+					do_sync_add_state(st, FALSE, ha_mcast_addr);
+				}
+			}
+
 			/* tell whack and log of progress */
 			{
-				const char *story = state_story[st->st_state - STATE_MAIN_R0];
+				const char *story = state_story[st->st_state];
 				enum rc_type w = RC_NEW_STATE + st->st_state;
 				char sadetails[128];
 

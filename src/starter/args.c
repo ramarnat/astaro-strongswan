@@ -105,6 +105,7 @@ static const char *LST_keyexchange[] = {
 };
 
 static const char *LST_pfsgroup[] = {
+	"modp768",
 	"modp1024",
 	"modp1536",
 	"modp2048",
@@ -135,6 +136,7 @@ static const char *LST_plutodebug[] = {
 	"oppo",
 	"controlmore",
 	"private",
+	"ha",
 	 NULL
 };
 
@@ -171,10 +173,12 @@ static const token_info_t token_info[] =
 
 	/* pluto/charon keywords */
 	{ ARG_LST,  offsetof(starter_config_t, setup.plutodebug), LST_plutodebug       },
+	{ ARG_UINT, offsetof(starter_config_t, setup.pluto_ikeport), NULL              },
 	{ ARG_STR,  offsetof(starter_config_t, setup.charondebug),  NULL               },
 	{ ARG_STR,  offsetof(starter_config_t, setup.prepluto), NULL                   },
 	{ ARG_STR,  offsetof(starter_config_t, setup.postpluto), NULL                  },
 	{ ARG_STR,  offsetof(starter_config_t, setup.plutostderrlog), NULL             },
+	{ ARG_ENUM, offsetof(starter_config_t, setup.probe_psk), LST_bool              },
 	{ ARG_ENUM, offsetof(starter_config_t, setup.uniqueids), LST_unique            },
 	{ ARG_UINT, offsetof(starter_config_t, setup.overridemtu), NULL                },
 	{ ARG_TIME, offsetof(starter_config_t, setup.crlcheckinterval), NULL           },
@@ -189,6 +193,10 @@ static const token_info_t token_info[] =
 	{ ARG_STR,  offsetof(starter_config_t, setup.pkcs11initargs), NULL             },
 	{ ARG_ENUM, offsetof(starter_config_t, setup.pkcs11keepstate), LST_bool        },
 	{ ARG_ENUM, offsetof(starter_config_t, setup.pkcs11proxy), LST_bool            },
+	{ ARG_STR,  offsetof(starter_config_t, setup.ha_interface), NULL               },
+	{ ARG_STR,  offsetof(starter_config_t, setup.ha_multicast), NULL               },
+	{ ARG_UINT, offsetof(starter_config_t, setup.ha_seqdiff_in), NULL              },
+	{ ARG_UINT, offsetof(starter_config_t, setup.ha_seqdiff_out), NULL             },
 
 	/* KLIPS keywords */
 	{ ARG_LST,  offsetof(starter_config_t, setup.klipsdebug), LST_klipsdebug       },
@@ -204,6 +212,8 @@ static const token_info_t token_info[] =
 	{ ARG_MISC, 0, NULL  /* KW_PFS */                                              },
 	{ ARG_MISC, 0, NULL  /* KW_COMPRESS */                                         },
 	{ ARG_ENUM, offsetof(starter_conn_t, install_policy), LST_bool                 },
+	{ ARG_MISC, 0, NULL  /* KW_PMTUDISC */                                         },
+	{ ARG_MISC, 0, NULL  /* KW_ECN */                                              },
 	{ ARG_MISC, 0, NULL  /* KW_AUTH */                                             },
 	{ ARG_MISC, 0, NULL  /* KW_AUTHBY */                                           },
 	{ ARG_MISC, 0, NULL  /* KW_EAP */                                              },
@@ -224,6 +234,7 @@ static const token_info_t token_info[] =
 	{ ARG_STR,  offsetof(starter_conn_t, ike), NULL                                },
 	{ ARG_STR,  offsetof(starter_conn_t, esp), NULL                                },
 	{ ARG_STR,  offsetof(starter_conn_t, pfsgroup), LST_pfsgroup                   },
+	{ ARG_MISC, 0, NULL                                                            },
 	{ ARG_TIME, offsetof(starter_conn_t, dpd_delay), NULL                          },
 	{ ARG_TIME, offsetof(starter_conn_t, dpd_timeout), NULL                        },
 	{ ARG_ENUM, offsetof(starter_conn_t, dpd_action), LST_dpd_action               },

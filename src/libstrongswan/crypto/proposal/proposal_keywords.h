@@ -25,6 +25,7 @@ struct proposal_token {
 	transform_type_t  type;
 	u_int16_t         algorithm;
 	u_int16_t         keysize;
+    u_int16_t         keysize_trunc;
 };
 
 extern const proposal_token_t* proposal_get_token(register const char *str,

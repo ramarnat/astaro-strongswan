@@ -287,6 +287,7 @@ int starter_whack_add_conn(starter_conn_t *conn)
 	msg.sa_keying_tries       = conn->sa_keying_tries;
 	msg.policy                = conn->policy;
 	msg.xauth_identity        = conn->xauth_identity;
+	msg.xfrm_flags            = conn->xfrm_flags;
 
 	/*
 	 * Make sure the IKEv2-only policy bits are unset for IKEv1 connections
@@ -302,6 +303,7 @@ int starter_whack_add_conn(starter_conn_t *conn)
 	msg.esp = conn->esp;
 	msg.ike = conn->ike;
 	msg.pfsgroup = conn->pfsgroup;
+	msg.dev = conn->dev;
 
 	/* taken from pluto/whack.c */
 	if (msg.pfsgroup)
@@ -411,5 +413,23 @@ int starter_whack_del_ca(starter_ca_t *ca)
 	msg.whack_ca     = TRUE;
 	msg.name         = ca->name;
 
+	return send_whack_msg(&msg);
+}
+
+/*
+ *  1 master
+ *  0 slave
+ * -1 init
+ * -2 resync
+ * -3 incseq
+ */
+int
+starter_whack_ha_mode(int mode)
+{
+	whack_message_t msg;
+
+	init_whack_msg(&msg);
+	msg.whack_ha_mode = TRUE;
+	msg.ha_master = mode;
 	return send_whack_msg(&msg);
 }

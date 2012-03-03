@@ -55,9 +55,11 @@ struct kernel_sa {
 		unsigned transport_proto;
 		unsigned replay_window;
 		unsigned reqid;
+		int dev;
 
 		unsigned authalg;
 		unsigned authkeylen;
+		unsigned authkeylen_trunc;
 		char *authkey;
 
 		unsigned encalg;
@@ -67,9 +69,10 @@ struct kernel_sa {
 		unsigned compalg;
 
 		int encapsulation;
+		struct state *st;
 
 		u_int16_t natt_sport, natt_dport;
-		u_int8_t transid, natt_type;
+		u_int8_t transid, natt_type, xfrm_flags;
 		ip_address *natt_oa;
 
 		const char *text_said;
@@ -99,6 +102,7 @@ struct kernel_ops {
 						   unsigned int transport_proto,
 						   const struct pfkey_proto_info *proto_info,
 						   time_t use_lifetime,
+						   int iface,
 						   unsigned int op,
 						   const char *text_said);
 		bool (*get_policy)(const struct kernel_sa *sa, bool inbound,
@@ -116,6 +120,7 @@ struct kernel_ops {
 							   ipsec_spi_t min,
 							   ipsec_spi_t max,
 							   const char *text_said);
+		bool (*update_seq)(uint8_t proto, uint32_t spi, uint32_t dst, uint32_t *seqno);
 };
 
 
@@ -182,8 +187,7 @@ extern ipsec_spi_t get_ipsec_spi(ipsec_spi_t avoid
 								 , bool tunnel_mode);
 extern ipsec_spi_t get_my_cpi(struct spd_route *sr, bool tunnel_mode);
 
-extern bool install_inbound_ipsec_sa(struct state *st);
-extern bool install_ipsec_sa(struct state *st, bool inbound_also);
+extern bool install_ipsec_sas(struct state *st);
 extern void delete_ipsec_sa(struct state *st, bool inbound_only);
 extern bool route_and_eroute(struct connection *c
 							 , struct spd_route *sr

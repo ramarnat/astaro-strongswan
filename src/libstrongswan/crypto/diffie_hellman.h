@@ -90,6 +90,15 @@ struct diffie_hellman_t {
 	void (*set_other_public_value) (diffie_hellman_t *this, chunk_t value);
 
 	/**
+	 * Gets the own private value to transmit.
+	 *
+	 * Space for returned chunk is allocated and must be freed by the caller.
+	 *
+	 * @param value		private value of caller is stored at this location
+	 */
+	void (*get_my_private_value) (diffie_hellman_t *this, chunk_t *value);
+
+	/**
 	 * Gets the own public value to transmit.
 	 *
 	 * Space for returned chunk is allocated and must be freed by the caller.

@@ -64,8 +64,10 @@ starter_cmp_conn(starter_conn_t *c1, starter_conn_t *c2)
 		return FALSE;
 
 	VARCMP(policy);
+	VARCMP(xfrm_flags);
 	VARCMP(addr_family);
 	VARCMP(tunnel_addr_family);
+	VARCMP(dev);
 
 	if (!starter_cmp_end(&c1->left, &c2->left))
 		return FALSE;

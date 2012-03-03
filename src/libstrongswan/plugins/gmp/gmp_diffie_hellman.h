@@ -41,9 +41,10 @@ struct gmp_diffie_hellman_t {
  * Creates a new gmp_diffie_hellman_t object.
  *
  * @param group			Diffie Hellman group number to use
+ * @param xa			Diffie Hellman private value to use
  * @return				gmp_diffie_hellman_t object, NULL if not supported
  */
-gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group);
+gmp_diffie_hellman_t *gmp_diffie_hellman_create(diffie_hellman_group_t group, chunk_t *xa);
 
 #endif /** GMP_DIFFIE_HELLMAN_H_ @}*/
 

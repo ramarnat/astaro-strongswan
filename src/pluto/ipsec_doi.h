@@ -24,6 +24,9 @@ extern void ipsecdoi_initiate(int whack_sock, struct connection *c
 
 extern void ipsecdoi_replace(struct state *st, unsigned long try);
 
+extern bool generate_skeyid_preshared(struct state *st, const chunk_t *pss);
+extern void generate_keys(struct state *st);
+
 extern void init_phase2_iv(struct state *st, const msgid_t *msgid);
 
 extern stf_status quick_outI1(int whack_sock
@@ -62,7 +65,6 @@ extern stf_status dpd_inI_outR(struct state *st
 			, struct isakmp_notification *const n, pb_stream *n_pbs);
 extern stf_status dpd_inR(struct state *st
 			, struct isakmp_notification *const n, pb_stream *n_pbs);
-extern void dpd_timeout(struct state *st);
 
 /* START_HASH_PAYLOAD
  *

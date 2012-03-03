@@ -29,7 +29,7 @@ extern void kernel_alg_register_pfkey(const struct sadb_msg *msg, int buflen);
 extern struct sadb_alg *kernel_alg_esp_sadb_alg(u_int alg_id);
 extern u_int kernel_alg_esp_ivlen(u_int alg_id);
 extern bool kernel_alg_esp_enc_ok(u_int alg_id, u_int key_len, struct alg_info_esp *nfo);
-extern bool kernel_alg_esp_ok_final(u_int ealg, u_int key_len, u_int aalg, struct alg_info_esp *alg_info);
+extern bool kernel_alg_esp_ok_final(u_int ealg, u_int key_len, u_int aalg, struct alg_info_esp *alg_info, u_int16_t *aalg_trunc);
 extern u_int kernel_alg_esp_enc_keylen(u_int alg_id);
 extern bool kernel_alg_esp_auth_ok(u_int auth, struct alg_info_esp *nfo);
 extern u_int kernel_alg_esp_auth_keylen(u_int auth);

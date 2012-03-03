@@ -164,6 +164,10 @@ starter_start_pluto (starter_config_t *cfg, bool no_fork, bool attach_gdb)
 	{
 		arg[argc++] = "--uniqueids";
 	}
+	if (cfg->setup.probe_psk)
+	{
+		arg[argc++] = "--probe-psk";
+	}
 	ADD_DEBUG("none")
 	ADD_DEBUG("all")
 	ADD_DEBUG("raw")
@@ -178,6 +182,7 @@ starter_start_pluto (starter_config_t *cfg, bool no_fork, bool attach_gdb)
 	ADD_DEBUG("oppo")
 	ADD_DEBUG("controlmore")
 	ADD_DEBUG("private")
+	ADD_DEBUG("ha")
 	if (cfg->setup.crlcheckinterval > 0)
 	{
 		static char buf1[15];
@@ -236,6 +241,40 @@ starter_start_pluto (starter_config_t *cfg, bool no_fork, bool attach_gdb)
 	if (cfg->setup.pkcs11proxy)
 	{
 		arg[argc++] = "--pkcs11proxy";
+	}
+	if (cfg->setup.ha_interface)
+	{
+		arg[argc++] = "--ha_interface";
+		arg[argc++] = cfg->setup.ha_interface;
+	}
+	if (cfg->setup.ha_multicast)
+	{
+		arg[argc++] = "--ha_multicast";
+		arg[argc++] = cfg->setup.ha_multicast;
+	}
+	if (cfg->setup.ha_seqdiff_in != 0xFFFFFFFF)
+	{
+		static char buf3[15];
+
+		arg[argc++] = "--ha_seqdiff_in";
+		snprintf(buf3, sizeof(buf3), "%lu", cfg->setup.ha_seqdiff_in);
+		arg[argc++] = buf3;
+	}
+	if (cfg->setup.ha_seqdiff_out != 0xFFFFFFFF)
+	{
+		static char buf4[15];
+
+		arg[argc++] = "--ha_seqdiff_out";
+		snprintf(buf4, sizeof(buf4), "%lu", cfg->setup.ha_seqdiff_out);
+		arg[argc++] = buf4;
+	}
+	if (cfg->setup.pluto_ikeport != IKE_UDP_PORT)
+	{
+		static char buf5[15];
+
+		arg[argc++] = "--ikeport";
+		snprintf(buf5, sizeof(buf5), "%lu", cfg->setup.pluto_ikeport);
+		arg[argc++] = buf5;
 	}
 
 	if (_pluto_pid)

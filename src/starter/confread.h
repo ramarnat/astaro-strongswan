@@ -125,6 +125,7 @@ struct starter_conn {
 		sa_family_t     addr_family;
 		sa_family_t     tunnel_addr_family;
 		bool            install_policy;
+		u_int8_t        xfrm_flags;
 		starter_end_t   left, right;
 
 		unsigned long   id;
@@ -132,6 +133,8 @@ struct starter_conn {
 		char            *esp;
 		char            *ike;
 		char            *pfsgroup;
+
+		int 		dev;
 
 		time_t          dpd_delay;
 		time_t          dpd_timeout;
@@ -184,10 +187,12 @@ struct starter_config {
 
 				/* pluto/charon keywords */
 				char     **plutodebug;
+				u_int    pluto_ikeport;
 				char     *charondebug;
 				char     *prepluto;
 				char     *postpluto;
 				char     *plutostderrlog;
+				bool     probe_psk;
 				bool     uniqueids;
 				u_int    overridemtu;
 				u_int    crlcheckinterval;
@@ -202,6 +207,10 @@ struct starter_config {
 				char     *pkcs11initargs;
 				bool     pkcs11keepstate;
 				bool     pkcs11proxy;
+				char     *ha_interface;
+				char     *ha_multicast;
+				unsigned long   ha_seqdiff_in;
+				unsigned long   ha_seqdiff_out;
 
 				/* KLIPS keywords */
 				char    **klipsdebug;
